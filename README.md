@@ -110,6 +110,7 @@ agent_bridge/
 │   ├── ISSUE_TEMPLATE/       # Bug report and feature request templates
 │   ├── pull_request_template.md
 │   └── workflows/ci.yml      # GitHub Actions CI
+├── assets/                    # Static assets (images, etc.)
 ├── src/
 │   ├── bridge.ts             # Claude foreground MCP client that ensures the daemon exists and forwards messages
 │   ├── daemon.ts             # Persistent background process that owns the Codex proxy and bridge state
@@ -145,10 +146,25 @@ agent_bridge/
 
 ## Roadmap
 
-- **Message filtering / key checkpoint mode**: the bridge currently forwards all messages in both directions, which creates a lot of conversational noise. It should support forwarding only important checkpoints such as task delegation, review requests, and stage completion, while filtering low-value status chatter and log-reading exchanges.
+- **Smart message filtering**: Currently all `agentMessage` items are forwarded in both directions. Many of these are low-value status confirmations or log-reading exchanges. The bridge should support a filtering mode that only forwards key checkpoints — task delegation, review requests, stage completion — and suppresses intermediate chatter.
+- **Gemini CLI integration**: Bring [Gemini CLI](https://github.com/google-gemini/gemini-cli) into the bridge as a third agent, enabling three-way communication between Claude Code, Codex, and Gemini in the same session.
+- **Explicit addressing**: Support `@codex:` / `@claude:` prefixes to direct a message to a specific agent, rather than broadcasting to all.
+- **Turn-based coordination**: A state-machine mode that enforces alternating turns between agents, preventing runaway back-and-forth loops.
+- **Multi-session support**: Allow multiple Codex threads and multiple Claude connections simultaneously.
+- **Workflow templates**: Built-in patterns for common collaboration scenarios — cross-review (one agent writes, the other reviews), architect + builder (one designs, the other implements), and dual-perspective debugging.
 
 ## How This Project Was Built
 
 This project was built collaboratively by **Claude Code** (Anthropic) and **Codex** (OpenAI), communicating through AgentBridge itself — the very tool they were building together. A human developer coordinated the effort, assigning tasks, reviewing progress, and directing the two agents to work in parallel and review each other's output.
 
 In other words, AgentBridge is its own proof of concept: two AI agents from different providers, connected in real time, shipping code side by side.
+
+## Contact
+
+This is my first open-source project! I'd love to connect with anyone interested in multi-agent collaboration, AI tooling, or just building cool things together. Feel free to reach out:
+
+- **Twitter/X**: [@raysonmeng](https://x.com/raysonmeng)
+- **Xiaohongshu**: [Profile](https://www.xiaohongshu.com/user/profile/62a3709d0000000021028b7e)
+- **WeChat**: Scan the QR code below to add me
+
+<img src="assets/wechat-qr.jpg" alt="WeChat QR Code" width="300" />

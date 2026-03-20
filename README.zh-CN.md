@@ -110,6 +110,7 @@ agent_bridge/
 │   ├── ISSUE_TEMPLATE/       # Bug report 和 feature request 模板
 │   ├── pull_request_template.md
 │   └── workflows/ci.yml      # GitHub Actions CI
+├── assets/                    # 图片资源（微信二维码等）
 ├── src/
 │   ├── bridge.ts             # Claude 前台 MCP 客户端，负责确保 daemon 存在并转发消息
 │   ├── daemon.ts             # 常驻后台进程，持有 Codex 代理和桥接状态
@@ -145,10 +146,25 @@ agent_bridge/
 
 ## 待优化项
 
-- **消息过滤 / 关键节点模式**：当前所有消息都会双向全量转发，对话噪音较大。后续应支持只在关键节点转发，例如任务分配、review 请求、阶段完成等，同时过滤掉中间状态确认、日志读取等低价值交互。
+- **智能消息过滤**：当前所有 `agentMessage` 都会双向全量转发，其中很多是低价值的状态确认或日志读取。后续应支持过滤模式，只转发关键节点消息——任务分配、review 请求、阶段完成等，过滤掉中间的琐碎交互。
+- **Gemini CLI 接入**：将 [Gemini CLI](https://github.com/google-gemini/gemini-cli) 作为第三个 Agent 接入 Bridge，实现 Claude Code、Codex 和 Gemini 在同一会话中的三方通信。
+- **显式寻址**：支持 `@codex:` / `@claude:` 前缀，将消息定向发送给指定 Agent，而非广播给所有人。
+- **轮次协调**：状态机模式，强制 Agent 之间交替发言，防止无限循环对话。
+- **多会话支持**：允许同时存在多个 Codex thread 和多个 Claude 连接。
+- **工作流模板**：内置常见协作场景的模式——交叉审查（一个写代码，一个 review）、架构师+施工队（一个出设计，一个实现）、双视角调试（逻辑推理+执行验证互补）。
 
 ## 这个项目是怎么建成的
 
 这个项目由 **Claude Code**（Anthropic）和 **Codex**（OpenAI）通过 AgentBridge 本身进行实时双向通信，在人类开发者的指挥下协作完成。开发者负责分配任务、审查进度，并指挥两个 Agent 并行工作、互相 review。
 
 换句话说，AgentBridge 就是它自己的 proof of concept：两个来自不同厂商的 AI Agent，通过实时连接，肩并肩地交付代码。
+
+## 联系方式
+
+这是我首次开源的项目！欢迎对多 Agent 协作、AI 工具链感兴趣的朋友来交流，一起做一些更好玩的事情。
+
+- **Twitter/X**: [@raysonmeng](https://x.com/raysonmeng)
+- **小红书**: [主页](https://www.xiaohongshu.com/user/profile/62a3709d0000000021028b7e)
+- **微信**: 扫描下方二维码添加好友
+
+<img src="assets/wechat-qr.jpg" alt="微信二维码" width="300" />
