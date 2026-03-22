@@ -144,14 +144,35 @@ agent_bridge/
 - 当前只支持单个 Codex thread，不支持多会话
 - 当前只支持单个 Claude 前台连接；新的 Claude 会话会替换旧连接
 
-## 待优化项
+## Roadmap
 
-- **智能消息过滤**：当前所有 `agentMessage` 都会双向全量转发，其中很多是低价值的状态确认或日志读取。后续应支持过滤模式，只转发关键节点消息——任务分配、review 请求、阶段完成等，过滤掉中间的琐碎交互。
-- **Gemini CLI 接入**：将 [Gemini CLI](https://github.com/google-gemini/gemini-cli) 作为第三个 Agent 接入 Bridge，实现 Claude Code、Codex 和 Gemini 在同一会话中的三方通信。
-- **显式寻址**：支持 `@codex:` / `@claude:` 前缀，将消息定向发送给指定 Agent，而非广播给所有人。
-- **轮次协调**：状态机模式，强制 Agent 之间交替发言，防止无限循环对话。
-- **多会话支持**：允许同时存在多个 Codex thread 和多个 Claude 连接。
-- **工作流模板**：内置常见协作场景的模式——交叉审查（一个写代码，一个 review）、架构师+施工队（一个出设计，一个实现）、双视角调试（逻辑推理+执行验证互补）。
+### v1.x（当前） — 单桥体验优化
+
+在不改变架构的前提下优化体验：**降噪、控回合、定角色**。
+
+- **v1.1** 智能消息过滤 — Prompt Contract + Marker Protocol，让 agent 自己决定发什么
+- **v1.2** 双向协调 — Turn Signals + Attention Window，控制消息时序
+- **v1.3** 角色协作 — Role Contract + Thinking Patterns，建立协作分工和思考模式
+
+详见 [v1 路线图](docs/v1-roadmap.zh-CN.md)
+
+### v2（规划中） — 多 Agent 基础设施
+
+Daemon 变为纯消息路由器，支持多 Agent 类型、多实例共存：
+
+- Room 模型与作用域通信
+- Agent 身份注册与断线恢复
+- v2 控制协议（版本协商、认证、心跳、消息回执）
+- 可插拔 Policy 层
+- SQLite 持久化
+
+详见 [v2 架构设计](docs/v2-architecture.zh-CN.md)
+
+### v3+（远期） — 智能协作与高级编排
+
+- 成熟的 Policy 系统与工作流编排
+- 丰富的可观测性
+- 跨 runtime 的多方代理协作智能
 
 ## 这个项目是怎么建成的
 

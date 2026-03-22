@@ -146,12 +146,9 @@ agent_bridge/
 
 ## Roadmap
 
-- **Smart message filtering**: Currently all `agentMessage` items are forwarded in both directions. Many of these are low-value status confirmations or log-reading exchanges. The bridge should support a filtering mode that only forwards key checkpoints — task delegation, review requests, stage completion — and suppresses intermediate chatter.
-- **Gemini CLI integration**: Bring [Gemini CLI](https://github.com/google-gemini/gemini-cli) into the bridge as a third agent, enabling three-way communication between Claude Code, Codex, and Gemini in the same session.
-- **Explicit addressing**: Support `@codex:` / `@claude:` prefixes to direct a message to a specific agent, rather than broadcasting to all.
-- **Turn-based coordination**: A state-machine mode that enforces alternating turns between agents, preventing runaway back-and-forth loops.
-- **Multi-session support**: Allow multiple Codex threads and multiple Claude connections simultaneously.
-- **Workflow templates**: Built-in patterns for common collaboration scenarios — cross-review (one agent writes, the other reviews), architect + builder (one designs, the other implements), and dual-perspective debugging.
+- **v1.x (current)**: Improve the single-bridge experience without architectural refactoring — less noise, better turn discipline, and clearer collaboration modes. See [docs/v1-roadmap.md](docs/v1-roadmap.md).
+- **v2 (planned)**: Introduce the multi-agent foundation — room-scoped collaboration, stable identity, a formal control protocol, and stronger recovery semantics. See [docs/v2-architecture.md](docs/v2-architecture.md).
+- **v3+ (longer term)**: Explore smarter collaboration, richer policies, and more advanced orchestration across runtimes.
 
 ## How This Project Was Built
 
