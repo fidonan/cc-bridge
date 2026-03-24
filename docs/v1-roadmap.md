@@ -387,7 +387,144 @@ Users should not need to:
 
 The bridge itself should establish that shared awareness automatically when the session starts.
 
-## 8. Out of Scope for v1
+## 8. Dual-Mode Message Transport: Channel Push + Tool Pull
+
+### Problem
+
+The current bridge relies entirely on Claude Code's experimental Channel capability (`notifications/claude/channel`) for delivering Codex messages to Claude in real time. This requires the user to start Claude Code with `--dangerously-load-development-channels`, which in turn mandates OAuth authentication. Users who authenticate with an API key cannot use AgentBridge at all.
+
+This is a hard adoption blocker. API key users are a significant portion of the Claude Code user base, and requiring OAuth just to use a local development tool is an unnecessary barrier.
+
+### Proposed improvement
+
+Support two parallel message delivery modes within the same bridge, sharing the same daemon, message queue, and reply path:
+
+**Channel Push (OAuth users):**
+- When the channel capability is available, push messages in real time via `notifications/claude/channel`.
+- Identical to the current v1.0 behavior.
+- Claude receives messages as `<channel>` tags injected into the conversation stream.
+- No user action required — messages appear automatically.
+
+**Tool Pull (API key users):**
+- When the channel capability is not available, queue messages in the bridge process.
+- Provide a `get_messages` tool that Claude can call to retrieve pending messages.
+- Return queued messages as structured tool results.
+- Update MCP instructions to tell Claude about the `get_messages` tool and when to use it.
+
+### Detection strategy
+
+The bridge should detect which mode is available at startup and select automatically:
+
+1. The MCP server always declares `experimental: { "claude/channel": {} }` in its capabilities.
+2. During the MCP initialization handshake, check whether the client's capabilities indicate channel support.
+3. If channel support is detected: use push mode. Messages are delivered via `notifications/claude/channel` as they arrive.
+4. If channel support is not detected: use pull mode. Messages are queued and served via the `get_messages` tool.
+
+If client capability inspection is not reliable, a fallback detection approach is:
+
+- Always register the `get_messages` tool so it works in both modes.
+- Also attempt to send channel notifications.
+- Support an environment variable (`AGENTBRIDGE_MODE=push|pull|auto`) as an explicit override for users who know which mode they need.
+
+### Pull mode design
+
+#### Message queue
+
+- The bridge maintains an in-memory message queue for pending Codex messages.
+- Messages are appended to the queue as they arrive from the daemon.
+- When Claude calls `get_messages`, all queued messages are returned and the queue is cleared.
+- Queue size is bounded by `AGENTBRIDGE_MAX_BUFFERED_MESSAGES` (existing config, default 100).
+
+#### `get_messages` tool
+
+The tool returns all pending messages since the last call:
+
+```json
+{
+  "name": "get_messages",
+  "description": "Check for new messages from Codex. Call this periodically or when you expect a response.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  }
+}
+```
+
+Response when messages are available:
+
+```
+[2 new messages from Codex]
+
+---
+[1] 2024-01-15T10:30:00Z
+Codex: I've finished implementing the feature...
+
+---
+[2] 2024-01-15T10:30:05Z
+Codex: Tests are passing...
+```
+
+Response when no messages are pending:
+
+```
+No new messages from Codex.
+```
+
+#### Instructions update
+
+In pull mode, the MCP server instructions should tell Claude:
+
+- The `get_messages` tool is available for checking Codex messages.
+- Call `get_messages` after sending a reply to check for responses.
+- Call `get_messages` when the user asks about Codex status or progress.
+- The `reply` tool works identically in both modes.
+
+#### Hint in reply responses
+
+When messages are pending, the `reply` tool response should include a hint:
+
+```
+Reply sent to Codex. Note: 3 pending messages from Codex — call get_messages to read them.
+```
+
+This gives Claude a natural prompt to check for messages without requiring separate polling logic.
+
+### Shared behavior
+
+Both modes share:
+
+- The same `reply` tool and reply delivery path.
+- The same daemon and control WebSocket.
+- The same Codex adapter and message interception.
+- The same message format (`BridgeMessage`).
+
+The only difference is the delivery direction: push (server → client notification) vs. pull (client → server tool call).
+
+### Implementation scope
+
+- `claude-adapter.ts`: Add mode detection logic. Add `get_messages` tool registration. Add message queue for pull mode. Add pending message hints in `reply` responses.
+- `bridge.ts`: Adjust the `codexMessage` handler to either push or queue based on detected mode.
+- `types.ts`: No changes needed — `BridgeMessage` is shared.
+- Add `AGENTBRIDGE_MODE` environment variable support (`auto` | `push` | `pull`, default `auto`).
+- Update MCP instructions to cover both modes.
+
+### Expected user impact
+
+- API key users can use AgentBridge for the first time without any special flags.
+- OAuth users retain full real-time push behavior with no changes.
+- The bridge startup command simplifies to just `claude` for API key users.
+- The `get_messages` tool provides a clear, explicit interface for message retrieval.
+- Pending message hints in `reply` responses naturally guide Claude to check for new messages.
+
+### Known limitations
+
+- Pull mode is inherently less real-time than push mode. Claude only sees new messages when it actively calls `get_messages`.
+- There is no mechanism to "wake up" Claude when a message arrives in pull mode. The user or Claude must initiate the check.
+- In pull mode, if Claude does not call `get_messages`, messages accumulate silently.
+- These limitations are acceptable trade-offs for supporting API key authentication.
+
+## 9. Out of Scope for v1
 
 The following items are intentionally left out of v1 because they either require architectural restructuring or would pull later-version complexity into the current codebase:
 
@@ -400,7 +537,7 @@ The following items are intentionally left out of v1 because they either require
 
 These items belong to v2 or later because they cross the boundary from user experience optimization into architectural redesign.
 
-## 9. Version Positioning: v1 -> v2 -> v3 -> v4
+## 10. Version Positioning: v1 -> v2 -> v3 -> v4
 
 - **v1** focuses on improving the single-bridge user experience: better message quality, clearer turn discipline, and more intentional role-aware collaboration.
 - **v2** introduces the architectural foundation for multi-agent, multi-room, and recoverable collaboration.

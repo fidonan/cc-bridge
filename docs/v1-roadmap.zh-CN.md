@@ -369,8 +369,11 @@ v1.3 覆盖两个正交维度：
 # 首次安装和配置
 npx agentbridge init
 
-# 之后正常使用 Claude Code，bridge 自动启动
+# OAuth 用户（实时 push 模式）
 claude --dangerously-load-development-channels server:agentbridge
+
+# API key 用户（tool pull 模式，无需特殊标志）
+claude
 ```
 
 > `npx` 作为安装器，不作为长期运行时入口。`init` 完成后 MCP 配置指向本地稳定的可执行入口，避免每次启动都临时解析远程包。
@@ -419,7 +422,144 @@ Bridge 连接后，自动向每个 agent 注入两件事：
 - **v1.1/v1.2/v1.3 的内容统一在这里注入** — 消息标记、轮次协调、角色分工不是分散的，而是作为一个完整的协作意识包注入
 - **未来多 agent 时自动扩展** — 新 agent 加入后，bridge 自动告诉所有参与者"现在多了一个队友"
 
-## 8. v1 范围外的项目
+## 8. 双模式消息传输：Channel Push + Tool Pull
+
+### 问题
+
+当前 bridge 完全依赖 Claude Code 的实验性 Channel 能力（`notifications/claude/channel`）来实时传递 Codex 消息。这要求用户必须使用 `--dangerously-load-development-channels` 标志启动 Claude Code，而该标志又强制要求 OAuth 认证。使用 API key 认证的用户完全无法使用 AgentBridge。
+
+这是一个硬性的使用门槛。API key 用户占 Claude Code 用户的重要比例，对一个本地开发工具强制要求 OAuth 是不必要的障碍。
+
+### 方案：双模式并行，自动检测切换
+
+在同一个 bridge 内支持两种并行的消息传递模式，共享相同的 daemon、消息队列和回复路径：
+
+**Channel Push 模式（OAuth 用户）：**
+- Channel 能力可用时，通过 `notifications/claude/channel` 实时推送消息
+- 与当前 v1.0 行为完全一致
+- Claude 自动收到 `<channel>` 标签注入的消息
+- 无需用户操作，消息自动出现
+
+**Tool Pull 模式（API key 用户）：**
+- Channel 能力不可用时，消息在 bridge 侧排队
+- 提供 `get_messages` 工具，Claude 主动调用获取待处理消息
+- 以结构化的工具返回值呈现排队消息
+- 更新 MCP instructions，告知 Claude `get_messages` 工具的用法和使用时机
+
+### 检测策略
+
+Bridge 启动时自动检测可用模式并选择：
+
+1. MCP server 始终在 capabilities 中声明 `experimental: { "claude/channel": {} }`
+2. 在 MCP 初始化握手期间，检查客户端 capabilities 是否支持 channel
+3. 检测到 channel 支持 → 使用 push 模式，消息通过 `notifications/claude/channel` 实时推送
+4. 未检测到 channel 支持 → 使用 pull 模式，消息排队等待 `get_messages` 工具拉取
+
+备选检测方式：
+
+- 始终注册 `get_messages` 工具（两种模式都可用）
+- 同时尝试发送 channel 通知
+- 支持环境变量 `AGENTBRIDGE_MODE=push|pull|auto` 作为显式覆盖
+
+### Pull 模式设计
+
+#### 消息队列
+
+- Bridge 维护内存消息队列，存储待处理的 Codex 消息
+- 消息从 daemon 到达时追加到队列
+- Claude 调用 `get_messages` 时，返回所有排队消息并清空队列
+- 队列大小受 `AGENTBRIDGE_MAX_BUFFERED_MESSAGES` 限制（已有配置，默认 100）
+
+#### `get_messages` 工具
+
+返回上次调用以来的所有新消息：
+
+```json
+{
+  "name": "get_messages",
+  "description": "Check for new messages from Codex. Call this periodically or when you expect a response.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  }
+}
+```
+
+有消息时返回格式化的消息列表：
+
+```
+[2 new messages from Codex]
+
+---
+[1] 2024-01-15T10:30:00Z
+Codex: I've finished implementing the feature...
+
+---
+[2] 2024-01-15T10:30:05Z
+Codex: Tests are passing...
+```
+
+无消息时返回：
+
+```
+No new messages from Codex.
+```
+
+#### Instructions 更新
+
+Pull 模式下，MCP server instructions 应告诉 Claude：
+
+- `get_messages` 工具可用于检查 Codex 消息
+- 发送 reply 后调用 `get_messages` 检查回复
+- 用户询问 Codex 状态或进展时调用 `get_messages`
+- `reply` 工具在两种模式下行为完全一致
+
+#### Reply 响应中的消息提示
+
+当有待处理消息时，`reply` 工具的返回中附带提示：
+
+```
+Reply sent to Codex. Note: 3 pending messages from Codex — call get_messages to read them.
+```
+
+这让 Claude 有自然的动机去检查新消息，不需要额外的轮询逻辑。
+
+### 共享行为
+
+两种模式共享：
+
+- 相同的 `reply` 工具和回复传递路径
+- 相同的 daemon 和 control WebSocket
+- 相同的 Codex adapter 和消息拦截
+- 相同的消息格式（`BridgeMessage`）
+
+唯一差异是传递方向：push（server → client notification）vs. pull（client → server tool call）。
+
+### 改动范围
+
+- `claude-adapter.ts`：增加模式检测逻辑、`get_messages` 工具注册、pull 模式消息队列、reply 响应中的待处理消息提示
+- `bridge.ts`：调整 `codexMessage` handler，根据检测到的模式选择 push 或排队
+- `types.ts`：无需改动，`BridgeMessage` 共享
+- 新增 `AGENTBRIDGE_MODE` 环境变量（`auto` | `push` | `pull`，默认 `auto`）
+- 更新 MCP instructions 覆盖两种模式
+
+### 预期效果
+
+- API key 用户首次能够使用 AgentBridge，无需任何特殊标志
+- OAuth 用户保持完整的实时 push 行为不变
+- API key 用户的启动命令简化为普通的 `claude`
+- `get_messages` 工具提供清晰、显式的消息获取接口
+- reply 响应中的待处理消息提示自然引导 Claude 检查新消息
+
+### 已知局限
+
+- Pull 模式本质上不如 push 模式实时。Claude 只在主动调用 `get_messages` 时才能看到新消息
+- Pull 模式下没有机制"唤醒" Claude。需要用户或 Claude 主动发起检查
+- 如果 Claude 不调用 `get_messages`，消息会静默堆积
+- 这些是支持 API key 认证的可接受折中
+
+## 9. v1 范围外的项目
 
 以下项目明确不在 v1 范围内，留给 v2 或更后续版本：
 
@@ -435,7 +575,7 @@ Bridge 连接后，自动向每个 agent 注入两件事：
 | Runtime 级事件流拦截 | 需要深入 Codex app-server 协议，属于 v2 richer observability | v2+ |
 | 完整的显式寻址路由 | 需要 Room + 多 agent，v1 单对端无实际路由价值 | v2 |
 
-## 9. 版本演进定位
+## 10. 版本演进定位
 
 | 版本 | 一句话定位 |
 |------|-----------|
