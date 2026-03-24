@@ -209,6 +209,8 @@ export class CodexAdapter extends EventEmitter {
         this.log("App-server connection closed");
         this.appServerWs = null;
         this.clearResponseTrackingState();
+        this.activeTurnIds.clear();
+        this.turnInProgress = false;
         if (!this.intentionalDisconnect) {
           this.scheduleReconnect();
         }
@@ -461,10 +463,15 @@ export class CodexAdapter extends EventEmitter {
         }
         break;
       }
-      case "turn/completed":
+      case "turn/completed": {
+        const wasInProgress = this.turnInProgress;
         this.markTurnCompleted(params?.turn?.id);
-        this.emit("turnCompleted");
+        // Only emit when all turns are done (symmetric with turnStarted)
+        if (wasInProgress && !this.turnInProgress) {
+          this.emit("turnCompleted");
+        }
         break;
+      }
     }
   }
 
@@ -566,6 +573,7 @@ export class CodexAdapter extends EventEmitter {
   }
 
   private markTurnStarted(turnId?: string) {
+    const wasInProgress = this.turnInProgress;
     if (typeof turnId === "string" && turnId.length > 0) {
       this.activeTurnIds.add(turnId);
     } else {
@@ -573,6 +581,9 @@ export class CodexAdapter extends EventEmitter {
     }
 
     this.turnInProgress = this.activeTurnIds.size > 0;
+    if (!wasInProgress && this.turnInProgress) {
+      this.emit("turnStarted");
+    }
   }
 
   private markTurnCompleted(turnId?: string) {
