@@ -139,12 +139,20 @@ Install dependencies:
 
 ```bash
 cd cc-bridge
-bun install
+bun run setup
 ```
 
-Register two MCP instances:
+This setup command will:
+
+- install dependencies
+- register `cc-bridge-1`
+- register `cc-bridge-2`
+- verify both MCP entries exist
+
+If you want to run the steps manually instead:
 
 ```bash
+bun install
 bash ./scripts/cc-bridge-register-instance.sh 1 cc-bridge-1
 bash ./scripts/cc-bridge-register-instance.sh 2 cc-bridge-2
 ```

@@ -141,12 +141,20 @@ English version: [README.md](README.md)
 
 ```bash
 cd cc-bridge
-bun install
+bun run setup
 ```
 
-注册两个 MCP 实例：
+这条初始化命令会自动：
+
+- 安装依赖
+- 注册 `cc-bridge-1`
+- 注册 `cc-bridge-2`
+- 验证两个 MCP 条目都存在
+
+如果你想手动执行，也可以用下面这些命令：
 
 ```bash
+bun install
 bash ./scripts/cc-bridge-register-instance.sh 1 cc-bridge-1
 bash ./scripts/cc-bridge-register-instance.sh 2 cc-bridge-2
 ```

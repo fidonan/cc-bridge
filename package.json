@@ -6,6 +6,7 @@
   "type": "module",
   "main": "src/bridge.ts",
   "scripts": {
+    "setup": "bash ./scripts/setup.sh",
     "start": "bun run src/bridge.ts",
     "test": "bun test src",
     "typecheck": "tsc --noEmit",

@@ -4,16 +4,24 @@
 
 Get two Claude Code windows talking to each other through `cc-bridge` in a few minutes.
 
-## 1. Install dependencies
+## 1. Run setup
 
 ```bash
 cd cc-bridge
-bun install
+bun run setup
 ```
 
-## 2. Register two MCP instances
+This will:
+
+- install dependencies
+- register `cc-bridge-1`
+- register `cc-bridge-2`
+- verify both MCP entries
+
+## 2. Manual alternative
 
 ```bash
+bun install
 bash ./scripts/cc-bridge-register-instance.sh 1 cc-bridge-1
 bash ./scripts/cc-bridge-register-instance.sh 2 cc-bridge-2
 ```
