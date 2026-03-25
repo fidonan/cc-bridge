@@ -7,7 +7,7 @@ Get two Claude Code windows talking to each other through `cc-bridge` in a few m
 ## 1. Install dependencies
 
 ```bash
-cd /Users/fido/Desktop/projects/cc-bridge
+cd cc-bridge
 bun install
 ```
 
@@ -30,7 +30,7 @@ claude mcp get cc-bridge-2
 In both windows:
 
 ```bash
-cd /Users/fido/Desktop/projects/cc-bridge
+cd cc-bridge
 claude
 ```
 
@@ -121,7 +121,7 @@ Then reopen both Claude windows and try again.
 
 ## 9. Where to go next
 
-- Full usage guide: [SOP.md](/Users/fido/Desktop/projects/cc-bridge/SOP.md)
-- Multi-window notes: [MULTI_CLAUDE_WINDOWS.md](/Users/fido/Desktop/projects/cc-bridge/MULTI_CLAUDE_WINDOWS.md)
-- Project overview: [README.md](/Users/fido/Desktop/projects/cc-bridge/README.md)
-- Prompt templates: [PROMPTS.md](/Users/fido/Desktop/projects/cc-bridge/PROMPTS.md)
+- Full usage guide: [SOP.md](SOP.md)
+- Multi-window notes: [MULTI_CLAUDE_WINDOWS.md](MULTI_CLAUDE_WINDOWS.md)
+- Project overview: [README.md](README.md)
+- Prompt templates: [PROMPTS.md](PROMPTS.md)

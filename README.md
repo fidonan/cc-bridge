@@ -8,7 +8,7 @@ Current target architecture:
 
 Start here for the fastest setup:
 
-- [QUICKSTART.md](/Users/fido/Desktop/projects/cc-bridge/QUICKSTART.md)
+- [QUICKSTART.md](QUICKSTART.md)
 
 ## Acknowledgement
 
@@ -124,21 +124,21 @@ Current constraints:
 
 ## Important files
 
-- [src/bridge.ts](/Users/fido/Desktop/projects/cc-bridge/src/bridge.ts)
-- [src/daemon.ts](/Users/fido/Desktop/projects/cc-bridge/src/daemon.ts)
-- [src/daemon-client.ts](/Users/fido/Desktop/projects/cc-bridge/src/daemon-client.ts)
-- [src/claude-adapter.ts](/Users/fido/Desktop/projects/cc-bridge/src/claude-adapter.ts)
-- [src/control-protocol.ts](/Users/fido/Desktop/projects/cc-bridge/src/control-protocol.ts)
-- [src/instance-config.ts](/Users/fido/Desktop/projects/cc-bridge/src/instance-config.ts)
-- [MULTI_CLAUDE_WINDOWS.md](/Users/fido/Desktop/projects/cc-bridge/MULTI_CLAUDE_WINDOWS.md)
-- [SOP.md](/Users/fido/Desktop/projects/cc-bridge/SOP.md)
+- [src/bridge.ts](src/bridge.ts)
+- [src/daemon.ts](src/daemon.ts)
+- [src/daemon-client.ts](src/daemon-client.ts)
+- [src/claude-adapter.ts](src/claude-adapter.ts)
+- [src/control-protocol.ts](src/control-protocol.ts)
+- [src/instance-config.ts](src/instance-config.ts)
+- [MULTI_CLAUDE_WINDOWS.md](MULTI_CLAUDE_WINDOWS.md)
+- [SOP.md](SOP.md)
 
 ## Quick start
 
 Install dependencies:
 
 ```bash
-cd /Users/fido/Desktop/projects/cc-bridge
+cd cc-bridge
 bun install
 ```
 
@@ -158,11 +158,11 @@ claude mcp get cc-bridge-2
 
 Then follow:
 
-- [QUICKSTART.md](/Users/fido/Desktop/projects/cc-bridge/QUICKSTART.md)
-- [MULTI_CLAUDE_WINDOWS.md](/Users/fido/Desktop/projects/cc-bridge/MULTI_CLAUDE_WINDOWS.md)
-- [SOP.md](/Users/fido/Desktop/projects/cc-bridge/SOP.md)
-- [PROMPTS.md](/Users/fido/Desktop/projects/cc-bridge/PROMPTS.md)
-- [PUBLISHING.md](/Users/fido/Desktop/projects/cc-bridge/PUBLISHING.md)
+- [QUICKSTART.md](QUICKSTART.md)
+- [MULTI_CLAUDE_WINDOWS.md](MULTI_CLAUDE_WINDOWS.md)
+- [SOP.md](SOP.md)
+- [PROMPTS.md](PROMPTS.md)
+- [PUBLISHING.md](PUBLISHING.md)
 
 ## Logs and relay state
 

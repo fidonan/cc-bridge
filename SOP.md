@@ -14,7 +14,7 @@ claude mcp get cc-bridge-2
 ## 2. Clean old relay state when needed
 
 ```bash
-pkill -f '/Users/fido/Desktop/projects/cc-bridge/src/daemon.ts'
+pkill -f 'cc-bridge/src/daemon.ts'
 rm -rf /tmp/cc-bridge/default
 rm -f /tmp/cc-bridge-1.log /tmp/cc-bridge-2.log
 ```
@@ -24,7 +24,7 @@ rm -f /tmp/cc-bridge-1.log /tmp/cc-bridge-2.log
 In both windows:
 
 ```bash
-cd /Users/fido/Desktop/projects/cc-bridge
+cd cc-bridge
 claude
 ```
 

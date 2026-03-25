@@ -10,7 +10,7 @@ English version: [README.md](README.md)
 
 如果你想最快开始，请先看：
 
-- [QUICKSTART.md](/Users/fido/Desktop/projects/cc-bridge/QUICKSTART.md)
+- [QUICKSTART.md](QUICKSTART.md)
 
 ## 致谢
 
@@ -126,21 +126,21 @@ English version: [README.md](README.md)
 
 ## 关键文件
 
-- [src/bridge.ts](/Users/fido/Desktop/projects/cc-bridge/src/bridge.ts)
-- [src/daemon.ts](/Users/fido/Desktop/projects/cc-bridge/src/daemon.ts)
-- [src/daemon-client.ts](/Users/fido/Desktop/projects/cc-bridge/src/daemon-client.ts)
-- [src/claude-adapter.ts](/Users/fido/Desktop/projects/cc-bridge/src/claude-adapter.ts)
-- [src/control-protocol.ts](/Users/fido/Desktop/projects/cc-bridge/src/control-protocol.ts)
-- [src/instance-config.ts](/Users/fido/Desktop/projects/cc-bridge/src/instance-config.ts)
-- [MULTI_CLAUDE_WINDOWS.md](/Users/fido/Desktop/projects/cc-bridge/MULTI_CLAUDE_WINDOWS.md)
-- [SOP.md](/Users/fido/Desktop/projects/cc-bridge/SOP.md)
+- [src/bridge.ts](src/bridge.ts)
+- [src/daemon.ts](src/daemon.ts)
+- [src/daemon-client.ts](src/daemon-client.ts)
+- [src/claude-adapter.ts](src/claude-adapter.ts)
+- [src/control-protocol.ts](src/control-protocol.ts)
+- [src/instance-config.ts](src/instance-config.ts)
+- [MULTI_CLAUDE_WINDOWS.md](MULTI_CLAUDE_WINDOWS.md)
+- [SOP.md](SOP.md)
 
 ## 快速开始
 
 安装依赖：
 
 ```bash
-cd /Users/fido/Desktop/projects/cc-bridge
+cd cc-bridge
 bun install
 ```
 
@@ -160,11 +160,11 @@ claude mcp get cc-bridge-2
 
 然后参考：
 
-- [QUICKSTART.md](/Users/fido/Desktop/projects/cc-bridge/QUICKSTART.md)
-- [MULTI_CLAUDE_WINDOWS.md](/Users/fido/Desktop/projects/cc-bridge/MULTI_CLAUDE_WINDOWS.md)
-- [SOP.md](/Users/fido/Desktop/projects/cc-bridge/SOP.md)
-- [PROMPTS.md](/Users/fido/Desktop/projects/cc-bridge/PROMPTS.md)
-- [PUBLISHING.md](/Users/fido/Desktop/projects/cc-bridge/PUBLISHING.md)
+- [QUICKSTART.md](QUICKSTART.md)
+- [MULTI_CLAUDE_WINDOWS.md](MULTI_CLAUDE_WINDOWS.md)
+- [SOP.md](SOP.md)
+- [PROMPTS.md](PROMPTS.md)
+- [PUBLISHING.md](PUBLISHING.md)
 
 ## 日志与 relay 状态
 
