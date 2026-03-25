@@ -20,24 +20,27 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { EventEmitter } from "node:events";
 import { appendFileSync } from "node:fs";
+import { getInstanceConfig } from "./instance-config";
 import type { BridgeMessage } from "./types";
 
 export type ReplySender = (msg: BridgeMessage) => Promise<{ success: boolean; error?: string }>;
+export type PullMessageReader = () => Promise<BridgeMessage[]>;
+export type WaitMessageReader = (timeoutMs: number) => Promise<BridgeMessage[]>;
 export type DeliveryMode = "push" | "pull" | "auto";
 
 export const CLAUDE_INSTRUCTIONS = [
-  "Codex is an AI coding agent (OpenAI) running in a separate session on the same machine.",
+  "Your peer is another Claude Code session running on the same machine.",
   "",
   "## Message delivery",
-  "Messages from Codex may arrive in two ways depending on the connection mode:",
-  "- As <channel source=\"agentbridge\" chat_id=\"...\" user=\"Codex\" ...> tags (push mode)",
+  "Messages from your peer may arrive in two ways depending on the connection mode:",
+  "- As <channel source=\"cc-bridge\" chat_id=\"...\" user=\"Peer Claude\" ...> tags (push mode)",
   "- Via the get_messages tool (pull mode)",
   "",
   "## Collaboration roles",
   "Default roles in this setup:",
-  "- Claude: Reviewer, Planner, Hypothesis Challenger",
-  "- Codex: Implementer, Executor, Reproducer/Verifier",
-  "- Expect Codex to provide independent technical judgment and evidence, not passive agreement.",
+  "- Local Claude: reviewer / coordinator / challenger",
+  "- Peer Claude: independent engineer / implementer / verifier",
+  "- Expect the peer to provide independent technical judgment and evidence, not passive agreement.",
   "",
   "## Thinking patterns (task-driven)",
   "- Analytical/review tasks: Independent Analysis & Convergence",
@@ -48,24 +51,27 @@ export const CLAUDE_INSTRUCTIONS = [
   "- Use explicit phrases such as \"My independent view is:\", \"I agree on:\", \"I disagree on:\", and \"Current consensus:\".",
   "",
   "## How to interact",
-  "- Use the reply tool to send messages back to Codex — pass chat_id back.",
-  "- Use the get_messages tool to check for pending messages from Codex.",
+  "- Use the reply tool to send messages back to your peer — pass chat_id back.",
+  "- Use the get_messages tool to check for pending messages from your peer.",
+  "- Use the wait_for_messages tool to stay in an active dialogue without manual polling.",
   "- After sending a reply, call get_messages to check for responses.",
-  "- When the user asks about Codex status or progress, call get_messages.",
+  "- When the user asks about peer status or progress, call get_messages.",
   "",
   "## Turn coordination",
-  "- When you see '⏳ Codex is working', do NOT call the reply tool — wait for '✅ Codex finished'.",
-  "- After Codex finishes a turn, you have an attention window to review and respond before new messages arrive.",
-  "- If the reply tool returns a busy error, Codex is still executing — wait and try again later.",
+  "- Use short, explicit messages and wait for your peer's response before changing direction.",
+  "- After your peer replies, you have an attention window to review and respond before new messages arrive.",
+  "- If the reply tool returns a busy error, wait and try again later.",
 ].join("\n");
 
-const LOG_FILE = "/tmp/agentbridge.log";
+const LOG_FILE = getInstanceConfig().logFile;
 
 export class ClaudeAdapter extends EventEmitter {
   private server: Server;
   private notificationSeq = 0;
   private sessionId: string;
   private replySender: ReplySender | null = null;
+  private pullMessageReader: PullMessageReader | null = null;
+  private waitMessageReader: WaitMessageReader | null = null;
 
   // Dual-mode transport
   private readonly configuredMode: DeliveryMode;
@@ -83,7 +89,7 @@ export class ClaudeAdapter extends EventEmitter {
     this.maxBufferedMessages = parseInt(process.env.AGENTBRIDGE_MAX_BUFFERED_MESSAGES ?? "100", 10);
 
     this.server = new Server(
-      { name: "agentbridge", version: "0.1.0" },
+      { name: "cc-bridge", version: "0.1.0" },
       {
         capabilities: {
           experimental: { "claude/channel": {} },
@@ -109,6 +115,14 @@ export class ClaudeAdapter extends EventEmitter {
   /** Register the async sender that bridge provides for reply delivery. */
   setReplySender(sender: ReplySender) {
     this.replySender = sender;
+  }
+
+  setPullMessageReader(reader: PullMessageReader) {
+    this.pullMessageReader = reader;
+  }
+
+  setWaitMessageReader(reader: WaitMessageReader) {
+    this.waitMessageReader = reader;
   }
 
   /** Returns the resolved delivery mode. */
@@ -145,7 +159,7 @@ export class ClaudeAdapter extends EventEmitter {
   async pushNotification(message: BridgeMessage) {
     if (this.resolvedMode === "push") {
       await this.pushViaChannel(message);
-    } else {
+    } else if (!this.pullMessageReader) {
       this.queueForPull(message);
     }
   }
@@ -189,10 +203,17 @@ export class ClaudeAdapter extends EventEmitter {
 
   // ── get_messages ───────────────────────────────────────────
 
-  private drainMessages(): { content: Array<{ type: "text"; text: string }> } {
+  private async drainMessages(): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+    if (this.pullMessageReader) {
+      const pulled = await this.pullMessageReader();
+      if (pulled.length > 0) {
+        this.pendingMessages.push(...pulled);
+      }
+    }
+
     if (this.pendingMessages.length === 0 && this.droppedMessageCount === 0) {
       return {
-        content: [{ type: "text" as const, text: "No new messages from Codex." }],
+        content: [{ type: "text" as const, text: "No new messages from your peer." }],
       };
     }
 
@@ -203,7 +224,7 @@ export class ClaudeAdapter extends EventEmitter {
     this.droppedMessageCount = 0;
 
     const count = messages.length;
-    let header = `[${count} new message${count > 1 ? "s" : ""} from Codex]`;
+    let header = `[${count} new message${count > 1 ? "s" : ""} from peer]`;
     if (dropped > 0) {
       header += ` (${dropped} older message${dropped > 1 ? "s" : ""} were dropped due to queue overflow)`;
     }
@@ -212,7 +233,7 @@ export class ClaudeAdapter extends EventEmitter {
     const formatted = messages
       .map((msg, i) => {
         const ts = new Date(msg.timestamp).toISOString();
-        return `---\n[${i + 1}] ${ts}\nCodex: ${msg.content}`;
+        return `---\n[${i + 1}] ${ts}\nPeer: ${msg.content}`;
       })
       .join("\n\n");
 
@@ -234,7 +255,7 @@ export class ClaudeAdapter extends EventEmitter {
         {
           name: "reply",
           description:
-            "Send a message back to Codex. Your reply will be injected into the Codex session as a new user turn.",
+            "Send a message to the peer Claude session through cc-bridge.",
           inputSchema: {
             type: "object" as const,
             properties: {
@@ -253,10 +274,25 @@ export class ClaudeAdapter extends EventEmitter {
         {
           name: "get_messages",
           description:
-            "Check for new messages from Codex. Call this after sending a reply or when you expect a response from Codex.",
+            "Check for new messages from your peer Claude session. Call this after sending a reply or when you expect a response.",
           inputSchema: {
             type: "object" as const,
             properties: {},
+            required: [],
+          },
+        },
+        {
+          name: "wait_for_messages",
+          description:
+            "Wait for new messages from your peer Claude session. Use this for ongoing back-and-forth without manual polling.",
+          inputSchema: {
+            type: "object" as const,
+            properties: {
+              timeout_ms: {
+                type: "number",
+                description: "Maximum time to wait before returning. Default 30000.",
+              },
+            },
             required: [],
           },
         },
@@ -271,7 +307,11 @@ export class ClaudeAdapter extends EventEmitter {
       }
 
       if (name === "get_messages") {
-        return this.drainMessages();
+        return await this.drainMessages();
+      }
+
+      if (name === "wait_for_messages") {
+        return await this.waitForMessages(args as Record<string, unknown>);
       }
 
       return {
@@ -316,13 +356,42 @@ export class ClaudeAdapter extends EventEmitter {
 
     // Include pending message hint
     const pending = this.pendingMessages.length;
-    let responseText = "Reply sent to Codex.";
+    let responseText = "Reply sent to peer Claude.";
     if (pending > 0) {
-      responseText += ` Note: ${pending} unread Codex message${pending > 1 ? "s" : ""} already waiting \u2014 call get_messages to read them.`;
+      responseText += ` Note: ${pending} unread peer message${pending > 1 ? "s" : ""} already waiting \u2014 call get_messages to read them.`;
     }
 
     return {
       content: [{ type: "text" as const, text: responseText }],
+    };
+  }
+
+  private async waitForMessages(args: Record<string, unknown>) {
+    const timeoutArg = args?.timeout_ms;
+    const timeoutMs = typeof timeoutArg === "number" && Number.isFinite(timeoutArg)
+      ? Math.max(1000, Math.min(120000, Math.trunc(timeoutArg)))
+      : 30000;
+
+    const immediate = await this.drainMessages();
+    const immediateText = immediate.content[0]?.text ?? "";
+    if (immediateText !== "No new messages from your peer.") {
+      return immediate;
+    }
+
+    if (!this.waitMessageReader) {
+      return {
+        content: [{ type: "text" as const, text: `No new messages arrived within ${timeoutMs}ms.` }],
+      };
+    }
+
+    const waited = await this.waitMessageReader(timeoutMs);
+    if (waited.length > 0) {
+      this.pendingMessages.push(...waited);
+      return await this.drainMessages();
+    }
+
+    return {
+      content: [{ type: "text" as const, text: `No new messages arrived within ${timeoutMs}ms.` }],
     };
   }
 

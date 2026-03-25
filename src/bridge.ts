@@ -5,13 +5,15 @@ import { appendFileSync, readFileSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { ClaudeAdapter } from "./claude-adapter";
 import { DaemonClient } from "./daemon-client";
+import { getInstanceConfig } from "./instance-config";
 import type { BridgeMessage } from "./types";
 
-const CONTROL_PORT = parseInt(process.env.AGENTBRIDGE_CONTROL_PORT ?? "4502", 10);
-const PID_FILE = process.env.AGENTBRIDGE_PID_FILE ?? `/tmp/agentbridge-daemon-${CONTROL_PORT}.pid`;
+const INSTANCE = getInstanceConfig();
+const CONTROL_PORT = INSTANCE.controlPort;
+const PID_FILE = INSTANCE.pidFile;
 const CONTROL_HEALTH_URL = `http://127.0.0.1:${CONTROL_PORT}/healthz`;
 const CONTROL_WS_URL = `ws://127.0.0.1:${CONTROL_PORT}/ws`;
-const LOG_FILE = "/tmp/agentbridge.log";
+const LOG_FILE = INSTANCE.logFile;
 const DAEMON_PATH = fileURLToPath(new URL("./daemon.ts", import.meta.url));
 
 const claude = new ClaudeAdapter();
@@ -27,6 +29,14 @@ claude.setReplySender(async (msg: BridgeMessage) => {
   return daemonClient.sendReply(msg);
 });
 
+claude.setPullMessageReader(async () => {
+  return daemonClient.pullMessages();
+});
+
+claude.setWaitMessageReader(async (timeoutMs) => {
+  return daemonClient.waitForMessages(timeoutMs);
+});
+
 daemonClient.on("codexMessage", (message) => {
   log(`Forwarding daemon → Claude (${message.content.length} chars)`);
   void claude.pushNotification(message);
@@ -34,7 +44,7 @@ daemonClient.on("codexMessage", (message) => {
 
 daemonClient.on("status", (status) => {
   log(
-    `Daemon status: ready=${status.bridgeReady} tui=${status.tuiConnected} thread=${status.threadId ?? "none"} queued=${status.queuedMessageCount}`,
+    `Daemon status: ready=${status.bridgeReady} peerConnected=${status.peerConnected} room=${status.room} peers=${status.peerCount} queued=${status.queuedMessageCount}`,
   );
 });
 
@@ -44,12 +54,12 @@ daemonClient.on("disconnect", () => {
   log("Daemon control connection closed");
   void claude.pushNotification(systemMessage(
     "system_daemon_disconnected",
-    "⚠️ AgentBridge daemon control connection lost. The Codex proxy may still be running in the background, but Claude cannot communicate bidirectionally right now.",
+    "⚠️ cc-bridge daemon control connection lost. Claude cannot communicate with its peer right now.",
   ));
 });
 
 claude.on("ready", async () => {
-  log(`MCP server ready (delivery mode: ${claude.getDeliveryMode()}) — ensuring AgentBridge daemon...`);
+  log(`MCP server ready (delivery mode: ${claude.getDeliveryMode()}) — ensuring cc-bridge daemon...`);
 
   try {
     await ensureDaemonRunning();
@@ -60,7 +70,7 @@ claude.on("ready", async () => {
     await claude.pushNotification(
       systemMessage(
         "system_daemon_connect_failed",
-        `❌ AgentBridge daemon failed to start or is unreachable: ${err.message}`,
+        `❌ cc-bridge daemon failed to start or is unreachable: ${err.message}`,
       ),
     );
   }
@@ -127,7 +137,7 @@ async function waitForDaemonHealthy(maxRetries = 40, delayMs = 250) {
     await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
 
-  throw new Error(`Timed out waiting for AgentBridge daemon health on ${CONTROL_HEALTH_URL}`);
+  throw new Error(`Timed out waiting for cc-bridge daemon health on ${CONTROL_HEALTH_URL}`);
 }
 
 function readDaemonPid() {
@@ -188,14 +198,14 @@ process.on("unhandledRejection", (reason: any) => {
 });
 
 function log(msg: string) {
-  const line = `[${new Date().toISOString()}] [AgentBridgeFrontend] ${msg}\n`;
+  const line = `[${new Date().toISOString()}] [cc-bridge-frontend] ${msg}\n`;
   process.stderr.write(line);
   try {
     appendFileSync(LOG_FILE, line);
   } catch {}
 }
 
-log(`Starting AgentBridge frontend (daemon ws ${CONTROL_WS_URL})`);
+log(`Starting cc-bridge frontend for instance=${INSTANCE.instance} (daemon ws ${CONTROL_WS_URL})`);
 
 (async () => {
   try {

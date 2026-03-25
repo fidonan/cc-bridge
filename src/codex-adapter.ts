@@ -13,6 +13,7 @@ import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import { EventEmitter } from "node:events";
 import { appendFileSync } from "node:fs";
+import { getInstanceConfig } from "./instance-config";
 import type { BridgeMessage, CodexItem } from "./types";
 import type { ServerWebSocket } from "bun";
 
@@ -20,7 +21,7 @@ interface TuiSocketData {
   connId: number;
 }
 
-const LOG_FILE = "/tmp/agentbridge.log";
+const LOG_FILE = getInstanceConfig().logFile;
 const TRACKED_REQUEST_METHODS = new Set(["thread/start", "thread/resume", "turn/start"]);
 
 type TrackedRequestMethod = "thread/start" | "thread/resume" | "turn/start";
@@ -268,7 +269,7 @@ export class CodexAdapter extends EventEmitter {
           return fetch(`http://127.0.0.1:${self.appPort}${url.pathname}`);
         }
         if (server.upgrade(req, { data: { connId: 0 } })) return undefined;
-        return new Response("AgentBridge Codex Proxy");
+        return new Response("cc-bridge Codex Proxy");
       },
       websocket: {
         open: (ws: ServerWebSocket<TuiSocketData>) => self.onTuiConnect(ws),

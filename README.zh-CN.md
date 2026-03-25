@@ -1,199 +1,187 @@
-# AgentBridge
+# cc-bridge
 
 English version: [README.md](README.md)
 
-[![CI](https://github.com/raysonmeng/agent-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/raysonmeng/agent-bridge/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+用于同一台机器上两个 Claude Code 窗口点对点协作的本地 Bridge。
 
-让 Claude Code 和 Codex 在同一个工作会话中进行双向通信的本地 Bridge。
+当前目标架构：
 
-当前实现采用两层进程结构：
+`Claude Code A <-> cc-bridge <-> Claude Code B`
 
-- `bridge.ts` 是由 Claude Code 启动的前台 MCP 客户端
-- `daemon.ts` 是常驻本地的后台进程，持有 Codex app-server 代理和桥接状态
+如果你想最快开始，请先看：
 
-这意味着当 Claude Code 关闭时，前台 MCP 进程可以退出，而后台 daemon 与 Codex 代理继续存活；当 Claude Code 再次启动时，可以自动复用已有 daemon。
+- [QUICKSTART.md](/Users/fido/Desktop/projects/cc-bridge/QUICKSTART.md)
 
-## 这个项目是什么 / 不是什么
+## 致谢
 
-**这个项目是：**
+这个项目是基于 [`raysonmeng/agent-bridge`](https://github.com/raysonmeng/agent-bridge) 修改而来的 fork。
 
-- 一个把 Claude Code 和 Codex 连接到同一工作流里的本地开发工具
-- 一个在 MCP channel 与 Codex app-server 协议之间转发消息的桥接层
-- 一个面向人工参与、多代理协作场景的实验性方案
+感谢原作者和贡献者搭建了最初的 bridge 架构，并证明了本地 agent 协作这条路线的价值。当前这个 fork 是在那个基础之上，面向另一类使用场景做的延伸和实验。
 
-**这个项目不是：**
+## 原项目的价值
 
-- 一个托管服务或多租户系统
-- 一个面向任意 Agent 后端的通用编排框架
-- 一个可以隔离不可信工具的强化安全边界
+这个仓库最初来自 [`raysonmeng/agent-bridge`](https://github.com/raysonmeng/agent-bridge) 的本地 fork。
 
-## 架构
+原项目的价值非常明确，而且值得保留：
 
+- 它证明了本地多 Agent 协作不是概念演示，而是可以真正落地的开发工作流。
+- 它建立了一个很干净的双进程模型：
+  - `bridge.ts` 作为前台 MCP 进程
+  - `daemon.ts` 作为常驻本地后台进程
+- 它把 Claude 侧的 MCP 逻辑和底层传输/运行时逻辑分离开了。
+- 它把 bridge 定位成一个本地开发工具，而不是托管式编排平台。
+
+原始设计中的主链路是：
+
+`Claude Code <-> AgentBridge <-> Codex`
+
+这个设计依然有价值，因为当前 fork 继续沿用了它的控制面思路。
+
+## 当前 fork 改了什么
+
+这个 fork 已经不再以 Codex 为中心，而是改造成了 Claude-to-Claude bridge。
+
+当前目标是：
+
+- 两个 Claude Code 窗口通过各自独立的 MCP 实例交换消息
+- 每个 Claude 窗口绑定自己的 bridge 实例
+- 消息通过 `/tmp/cc-bridge` 下的本地 room relay 转发
+- 支持 API key 模式下的 pull 工作方式
+- 支持长轮询等待，使对话不必每一轮都靠手工 `get_messages`
+
+## 当前架构
+
+```text
+┌──────────────────┐      MCP stdio      ┌────────────────────┐
+│ Claude Code A    │ ───────────────────▶│ bridge.ts          │
+│ 实例 1           │ ◀───────────────────│ 前台客户端          │
+└──────────────────┘                     └─────────┬──────────┘
+                                                   │
+                                                   │ 本地控制 WS
+                                                   ▼
+                                         ┌────────────────────┐
+                                         │ daemon.ts          │
+                                         │ 实例 1 后台进程     │
+                                         └─────────┬──────────┘
+                                                   │
+                                                   │ 文件 relay room
+                                                   ▼
+                                         /tmp/cc-bridge/<room>
+                                                   ▲
+                                                   │
+                                         ┌─────────┴──────────┐
+                                         │ daemon.ts          │
+                                         │ 实例 2 后台进程     │
+                                         └─────────┬──────────┘
+                                                   │
+                                                   │ 本地控制 WS
+                                                   ▼
+┌──────────────────┐      MCP stdio      ┌────────────────────┐
+│ Claude Code B    │ ───────────────────▶│ bridge.ts          │
+│ 实例 2           │ ◀───────────────────│ 前台客户端          │
+└──────────────────┘                     └────────────────────┘
 ```
-┌──────────────┐          MCP stdio          ┌────────────────────┐
-│ Claude Code  │ ───────────────────────────▶ │ bridge.ts          │
-│ Session      │ ◀─────────────────────────── │ 前台 MCP 客户端     │
-└──────────────┘                              └─────────┬──────────┘
-                                                        │
-                                                        │ 本地控制 WS
-                                                        ▼
-                                              ┌────────────────────┐
-                                              │ daemon.ts          │
-                                              │ 常驻后台桥接进程    │
-                                              └─────────┬──────────┘
-                                                        │
-                                      ws://127.0.0.1:4501 proxy
-                                                        │
-                                                        ▼
-                                              ┌────────────────────┐
-                                              │ Codex app-server   │
-                                              └────────────────────┘
-```
 
-### 数据流
+## 为什么这次 fork 还需要额外改造
 
-| 方向 | 链路 |
-|------|------|
-| **Codex → Claude** | `daemon.ts` 捕获 `agentMessage` → 控制 WS → `bridge.ts` → `notifications/claude/channel` |
-| **Claude → Codex** | Claude 调用 `reply` tool → `bridge.ts` → 控制 WS → `daemon.ts` → `turn/start` 注入 Codex thread |
+原来 `Codex` 那条链路看起来更“自动”，是因为 Codex 能提供持续事件流，bridge 可以把这些事件主动推给 Claude。
 
-### 防循环
+但 `Claude <-> Claude` 不一样：
 
-每条消息都携带 `source` 字段（`"claude"` 或 `"codex"`），Bridge 永远不会把消息转发回它的来源。
+- 两边都是 MCP 客户端
+- 两边经常运行在 pull 模式
+- Claude 的 MCP 前端通常是短生命周期进程
 
-## 前置条件
+这意味着单纯的 `get_messages` 不足以形成自然连续的对话。所以当前 fork 额外补了：
 
-- [Bun](https://bun.sh)
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) v2.1.80+
-- [Codex CLI](https://github.com/openai/codex)，且本地可直接使用 `codex` 命令
+- daemon 持有的未读消息队列
+- 可重连的 pull 投递
+- `wait_for_messages` 长轮询能力
 
-## Quick Start
+## 当前状态
+
+已经实现：
+
+- 多实例 MCP 配置（`cc-bridge-1`、`cc-bridge-2`）
+- 每个实例独立端口、pid 文件、日志
+- `/tmp/cc-bridge` 下的本地 room relay
+- daemon 侧未读消息队列
+- 可重连的 `reply`
+- `get_messages`
+- `wait_for_messages`
+- 两个 Claude 自动讨论的本地验证
+
+已经本地验证通过：
+
+- A 可以发消息给 B
+- B 可以回复 A
+- 双方可以继续多轮交互，直到各自输出 `Current consensus:`
+
+当前约束：
+
+- 仍然只适用于本机
+- 每个实例同一时刻仍只支持一个前台 Claude 连接
+- 不是托管式多租户系统
+- 不是任意 Agent 提供方的通用总线
+
+## 关键文件
+
+- [src/bridge.ts](/Users/fido/Desktop/projects/cc-bridge/src/bridge.ts)
+- [src/daemon.ts](/Users/fido/Desktop/projects/cc-bridge/src/daemon.ts)
+- [src/daemon-client.ts](/Users/fido/Desktop/projects/cc-bridge/src/daemon-client.ts)
+- [src/claude-adapter.ts](/Users/fido/Desktop/projects/cc-bridge/src/claude-adapter.ts)
+- [src/control-protocol.ts](/Users/fido/Desktop/projects/cc-bridge/src/control-protocol.ts)
+- [src/instance-config.ts](/Users/fido/Desktop/projects/cc-bridge/src/instance-config.ts)
+- [MULTI_CLAUDE_WINDOWS.md](/Users/fido/Desktop/projects/cc-bridge/MULTI_CLAUDE_WINDOWS.md)
+- [SOP.md](/Users/fido/Desktop/projects/cc-bridge/SOP.md)
+
+## 快速开始
+
+安装依赖：
 
 ```bash
-# 1. 安装依赖
-cd agent_bridge
+cd /Users/fido/Desktop/projects/cc-bridge
 bun install
-
-# 2. 注册 MCP server
-# 将 .mcp.json.example 的内容合并到 ~/.claude/.mcp.json 中，
-# 并把路径替换为你本地的绝对路径：
-#   "agentbridge": { "command": "bun", "args": ["run", "/absolute/path/to/agent_bridge/src/bridge.ts"] }
-
-# 3. 启动 Claude Code 并以 channel 形式加载 AgentBridge（开发模式）
-claude --dangerously-load-development-channels server:agentbridge
 ```
 
-> 风险说明：`--dangerously-load-development-channels` 会把本地开发中的 channel 挂载进 Claude Code。这一能力当前属于 Research Preview。你只应启用自己信任的 channel 和 MCP server，因为对应的本地进程可以向 Claude 会话推送消息，并参与同一个工作区流程。AgentBridge 的目标是本地开发与实验，不适合放在不可信环境中使用。
-
-`bridge.ts` 启动后会先检查本地 daemon 是否已存在。
-
-- 如果不存在，会自动拉起 `daemon.ts`
-- 如果已存在，会直接复用已有 daemon
-
-`daemon.ts` 会自动以 WebSocket 模式启动 `codex app-server`，并在需要时通过 Claude channel 把 attach 命令提示出来。
+注册两个 MCP 实例：
 
 ```bash
-# 4. 在另一个终端连接到 Codex 代理，查看 Codex TUI
-codex --enable tui_app_server --remote ws://127.0.0.1:4501
+bash ./scripts/cc-bridge-register-instance.sh 1 cc-bridge-1
+bash ./scripts/cc-bridge-register-instance.sh 2 cc-bridge-2
 ```
 
-> 注意：TUI 连接的是 Bridge 代理端口（默认 `4501`），不是 app-server 端口（`4500`）。Bridge 会透明转发流量，并拦截 `agentMessage`。
+检查注册：
 
-Codex 的 `agentMessage` 会自动推送到 Claude 会话中。Claude 可以通过 `reply` tool 回复 Codex。
-
-## 文件结构
-
-```
-agent_bridge/
-├── .github/
-│   ├── ISSUE_TEMPLATE/       # Bug report 和 feature request 模板
-│   ├── pull_request_template.md
-│   └── workflows/ci.yml      # GitHub Actions CI
-├── assets/                    # 图片资源（微信二维码等）
-├── src/
-│   ├── bridge.ts             # Claude 前台 MCP 客户端，负责确保 daemon 存在并转发消息
-│   ├── daemon.ts             # 常驻后台进程，持有 Codex 代理和桥接状态
-│   ├── daemon-client.ts      # 前台连接 daemon 控制 WS 的客户端
-│   ├── control-protocol.ts   # 前后台共享控制协议
-│   ├── claude-adapter.ts     # 面向 Claude Code channel 的 MCP server 适配层
-│   ├── codex-adapter.ts      # Codex app-server WebSocket 代理与消息拦截
-│   └── types.ts              # 共享类型
-├── CODE_OF_CONDUCT.md
-├── CONTRIBUTING.md
-├── LICENSE
-├── README.md
-├── README.zh-CN.md
-├── SECURITY.md
-├── package.json
-└── tsconfig.json
+```bash
+claude mcp get cc-bridge-1
+claude mcp get cc-bridge-2
 ```
 
-## 配置
+然后参考：
 
-| 环境变量 | 默认值 | 说明 |
-|----------|--------|------|
-| `CODEX_WS_PORT` | `4500` | Codex app-server WebSocket 端口 |
-| `CODEX_PROXY_PORT` | `4501` | Bridge 代理端口，Codex TUI 连接此端口 |
-| `AGENTBRIDGE_CONTROL_PORT` | `4502` | `bridge.ts` 与 `daemon.ts` 之间的本地控制端口 |
-| `AGENTBRIDGE_PID_FILE` | `/tmp/agentbridge-daemon-4502.pid` | daemon pid 文件，用于避免重复启动 |
+- [QUICKSTART.md](/Users/fido/Desktop/projects/cc-bridge/QUICKSTART.md)
+- [MULTI_CLAUDE_WINDOWS.md](/Users/fido/Desktop/projects/cc-bridge/MULTI_CLAUDE_WINDOWS.md)
+- [SOP.md](/Users/fido/Desktop/projects/cc-bridge/SOP.md)
+- [PROMPTS.md](/Users/fido/Desktop/projects/cc-bridge/PROMPTS.md)
+- [PUBLISHING.md](/Users/fido/Desktop/projects/cc-bridge/PUBLISHING.md)
 
-## 当前限制
+## 日志与 relay 状态
 
-- 目前只转发 `agentMessage`，不转发 `commandExecution`、`fileChange` 等中间过程事件
-- 当前只支持单个 Codex thread，不支持多会话
-- 当前只支持单个 Claude 前台连接；新的 Claude 会话会替换旧连接
+日志：
 
-### Codex 的 Git 操作限制
+- 实例 1：`/tmp/cc-bridge-1.log`
+- 实例 2：`/tmp/cc-bridge-2.log`
 
-Codex 运行在沙箱环境中，**禁止对 `.git` 目录进行任何写操作**。这意味着 Codex 无法执行 `git commit`、`git push`、`git pull`、`git checkout -b`、`git merge` 等任何修改 Git 元数据的命令。尝试执行这些命令会导致 Codex 会话无限期挂起。
+relay 状态目录：
 
-当 Claude Code 使用了 **git worktree** 时，这个限制尤其需要注意 — worktree 与主仓库共享 `.git` 内部结构，可能会进一步收紧沙箱的约束。
+- `/tmp/cc-bridge/default`
 
-**建议做法：** 让 Claude Code 负责所有 Git 操作（创建分支、提交、推送、创建 PR）。Codex 专注于代码修改，通过 `agentMessage` 汇报完成的工作，由 Claude Code 负责 Git 工作流。
+## 与上游项目的关系
 
-## Roadmap
+上游 `agent-bridge` 作为 `Claude Code ↔ Codex` 协作桥仍然有明确价值。
 
-### v1.x（当前） — 单桥体验优化
+这个 fork 不是在否定那个方向，而是把同样的本地 bridge 模式重用到另一种场景：
 
-在不改变架构的前提下优化体验：**降噪、控回合、定角色**。
-
-- **v1.1** 智能消息过滤 — Prompt Contract + Marker Protocol，让 agent 自己决定发什么
-- **v1.2** 双向协调 — Turn Signals + Attention Window，控制消息时序
-- **v1.3** 角色协作 — Role Contract + Thinking Patterns，建立协作分工和思考模式
-
-详见 [v1 路线图](docs/v1-roadmap.zh-CN.md)
-
-### v2（规划中） — 多 Agent 基础设施
-
-Daemon 变为纯消息路由器，支持多 Agent 类型、多实例共存：
-
-- Room 模型与作用域通信
-- Agent 身份注册与断线恢复
-- v2 控制协议（版本协商、认证、心跳、消息回执）
-- 可插拔 Policy 层
-- SQLite 持久化
-
-详见 [v2 架构设计](docs/v2-architecture.zh-CN.md)
-
-### v3+（远期） — 智能协作与高级编排
-
-- 成熟的 Policy 系统与工作流编排
-- 丰富的可观测性
-- 跨 runtime 的多方代理协作智能
-
-## 这个项目是怎么建成的
-
-这个项目由 **Claude Code**（Anthropic）和 **Codex**（OpenAI）通过 AgentBridge 本身进行实时双向通信，在人类开发者的指挥下协作完成。开发者负责分配任务、审查进度，并指挥两个 Agent 并行工作、互相 review。
-
-换句话说，AgentBridge 就是它自己的 proof of concept：两个来自不同厂商的 AI Agent，通过实时连接，肩并肩地交付代码。
-
-## 联系方式
-
-这是我首次开源的项目！欢迎对多 Agent 协作、AI 工具链感兴趣的朋友来交流，一起做一些更好玩的事情。
-
-- **Twitter/X**: [@raysonmeng](https://x.com/raysonmeng)
-- **小红书**: [主页](https://www.xiaohongshu.com/user/profile/62a3709d0000000021028b7e)
-- **微信**: 扫描下方二维码添加好友
-
-<img src="assets/wechat-qr.jpg" alt="微信二维码" width="300" />
+- 上游：Claude Code ↔ Codex
+- 当前 fork：Claude Code A ↔ Claude Code B

@@ -1,15 +1,9 @@
 #!/usr/bin/env bun
 
-import { appendFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { ServerWebSocket } from "bun";
-import { CodexAdapter } from "./codex-adapter";
-import {
-  BRIDGE_CONTRACT_REMINDER,
-  StatusBuffer,
-  classifyMessage,
-  type FilterMode,
-} from "./message-filter";
-import { TuiConnectionState } from "./tui-connection-state";
+import { getInstanceConfig } from "./instance-config";
 import type { ControlClientMessage, ControlServerMessage, DaemonStatus } from "./control-protocol";
 import type { BridgeMessage } from "./types";
 
@@ -18,154 +12,46 @@ interface ControlSocketData {
   attached: boolean;
 }
 
-const CODEX_APP_PORT = parseInt(process.env.CODEX_WS_PORT ?? "4500", 10);
-const CODEX_PROXY_PORT = parseInt(process.env.CODEX_PROXY_PORT ?? "4501", 10);
-const CONTROL_PORT = parseInt(process.env.AGENTBRIDGE_CONTROL_PORT ?? "4502", 10);
-const PID_FILE = process.env.AGENTBRIDGE_PID_FILE ?? `/tmp/agentbridge-daemon-${CONTROL_PORT}.pid`;
-const LOG_FILE = "/tmp/agentbridge.log";
-const TUI_DISCONNECT_GRACE_MS = parseInt(process.env.TUI_DISCONNECT_GRACE_MS ?? "2500", 10);
-const MAX_BUFFERED_MESSAGES = parseInt(process.env.AGENTBRIDGE_MAX_BUFFERED_MESSAGES ?? "100", 10);
-const FILTER_MODE: FilterMode =
-  (process.env.AGENTBRIDGE_FILTER_MODE as FilterMode) === "full" ? "full" : "filtered";
-const IDLE_SHUTDOWN_MS = parseInt(process.env.AGENTBRIDGE_IDLE_SHUTDOWN_MS ?? "30000", 10);
-const ATTENTION_WINDOW_MS = parseInt(process.env.AGENTBRIDGE_ATTENTION_WINDOW_MS ?? "15000", 10);
+interface RelayEnvelope {
+  id: string;
+  sender: string;
+  room: string;
+  content: string;
+  timestamp: number;
+}
 
-const codex = new CodexAdapter(CODEX_APP_PORT, CODEX_PROXY_PORT);
-const attachCmd = `codex --enable tui_app_server --remote ${codex.proxyUrl}`;
+const INSTANCE = getInstanceConfig();
+const CONTROL_PORT = INSTANCE.controlPort;
+const PID_FILE = INSTANCE.pidFile;
+const LOG_FILE = INSTANCE.logFile;
+const ROOM = sanitizeName(process.env.CC_BRIDGE_ROOM ?? "default");
+const ENDPOINT = sanitizeName(process.env.CC_BRIDGE_ENDPOINT ?? INSTANCE.instance);
+const PEER_LABEL = process.env.CC_BRIDGE_PEER_LABEL ?? "Peer Claude";
+const STATE_ROOT = process.env.CC_BRIDGE_STATE_DIR ?? "/tmp/cc-bridge";
+const ROOM_DIR = join(STATE_ROOT, ROOM);
+const PEERS_DIR = join(ROOM_DIR, "peers");
+const MESSAGES_DIR = join(ROOM_DIR, "messages");
+const HEARTBEAT_MS = parsePositiveInt(process.env.CC_BRIDGE_HEARTBEAT_MS, 2000);
+const PEER_STALE_MS = parsePositiveInt(process.env.CC_BRIDGE_PEER_STALE_MS, 10000);
+const POLL_INTERVAL_MS = parsePositiveInt(process.env.CC_BRIDGE_POLL_INTERVAL_MS, 700);
+const IDLE_SHUTDOWN_MS = parsePositiveInt(process.env.AGENTBRIDGE_IDLE_SHUTDOWN_MS, 30000);
+const MAX_BUFFERED_MESSAGES = parsePositiveInt(process.env.AGENTBRIDGE_MAX_BUFFERED_MESSAGES, 100);
 
 let controlServer: ReturnType<typeof Bun.serve> | null = null;
 let attachedClaude: ServerWebSocket<ControlSocketData> | null = null;
 let nextControlClientId = 0;
 let nextSystemMessageId = 0;
-let codexBootstrapped = false;
-let attentionWindowTimer: ReturnType<typeof setTimeout> | null = null;
-let inAttentionWindow = false;
 let shuttingDown = false;
+let bootstrapped = false;
 let idleShutdownTimer: ReturnType<typeof setTimeout> | null = null;
-
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+let peerConnected = false;
+let peerCount = 0;
 const bufferedMessages: BridgeMessage[] = [];
-
-const tuiConnectionState = new TuiConnectionState({
-  disconnectGraceMs: TUI_DISCONNECT_GRACE_MS,
-  log,
-  onDisconnectPersisted: (connId) => {
-    emitToClaude(
-      systemMessage(
-        "system_tui_disconnected",
-        `⚠️ Codex TUI disconnected (conn #${connId}). Codex is still running in the background — reconnect the TUI to resume.`,
-      ),
-    );
-  },
-  onReconnectAfterNotice: (connId) => {
-    emitToClaude(
-      systemMessage(
-        "system_tui_reconnected",
-        `✅ Codex TUI reconnected (conn #${connId}). Bridge restored, communication can continue.`,
-      ),
-    );
-    codex.injectMessage("✅ Claude Code is still online, bridge restored. Bidirectional communication can continue.");
-  },
-});
-
-const statusBuffer = new StatusBuffer((summary) => emitToClaude(summary));
-
-codex.on("turnStarted", () => {
-  log("Codex turn started");
-  emitToClaude(
-    systemMessage(
-      "system_turn_started",
-      "⏳ Codex is working on the current task. Wait for completion before sending a reply.",
-    ),
-  );
-});
-
-codex.on("agentMessage", (msg: BridgeMessage) => {
-  if (msg.source !== "codex") return;
-  const result = classifyMessage(msg.content, FILTER_MODE);
-
-  // During attention window, suppress STATUS to give Claude space to respond
-  if (inAttentionWindow && result.marker === "status") {
-    log(`Codex → Claude [${result.marker}/buffer-attention] (${msg.content.length} chars)`);
-    statusBuffer.add(msg);
-    return;
-  }
-
-  log(`Codex → Claude [${result.marker}/${result.action}] (${msg.content.length} chars)`);
-  switch (result.action) {
-    case "forward":
-      if (result.marker === "important" && statusBuffer.size > 0) {
-        statusBuffer.flush("important message arrived");
-      }
-      emitToClaude(msg);
-      // IMPORTANT message — give Claude an attention window to respond
-      if (result.marker === "important") {
-        startAttentionWindow();
-      }
-      break;
-    case "buffer":
-      statusBuffer.add(msg);
-      break;
-    case "drop":
-      break;
-  }
-});
-
-codex.on("turnCompleted", () => {
-  log("Codex turn completed");
-  statusBuffer.flush("turn completed");
-  emitToClaude(
-    systemMessage(
-      "system_turn_completed",
-      "✅ Codex finished the current turn. You can reply now if needed.",
-    ),
-  );
-  startAttentionWindow();
-});
-
-codex.on("ready", (threadId: string) => {
-  tuiConnectionState.markBridgeReady();
-  log(`Codex ready — thread ${threadId}`);
-  log("Bridge fully operational");
-
-  emitToClaude(
-    systemMessage("system_ready", currentReadyMessage()),
-  );
-
-  if (attachedClaude) {
-    notifyCodexClaudeOnline();
-  }
-});
-
-codex.on("tuiConnected", (connId: number) => {
-  tuiConnectionState.handleTuiConnected(connId);
-  cancelIdleShutdown();
-  log(`Codex TUI connected (conn #${connId})`);
-  broadcastStatus();
-});
-
-codex.on("tuiDisconnected", (connId: number) => {
-  tuiConnectionState.handleTuiDisconnected(connId);
-  log(`Codex TUI disconnected (conn #${connId})`);
-  broadcastStatus();
-  scheduleIdleShutdown();
-});
-
-codex.on("error", (err: Error) => {
-  log(`Codex error: ${err.message}`);
-});
-
-codex.on("exit", (code: number | null) => {
-  log(`Codex process exited (code ${code})`);
-  statusBuffer.flush("codex exited");
-  tuiConnectionState.handleCodexExit();
-  emitToClaude(
-    systemMessage(
-      "system_codex_exit",
-      `⚠️ Codex app-server exited (code ${code ?? "unknown"}). AgentBridge daemon is still running, but the Codex side needs to be restarted.`,
-    ),
-  );
-  broadcastStatus();
-});
+const pendingPullMessages: BridgeMessage[] = [];
+const waiters = new Map<string, { ws: ServerWebSocket<ControlSocketData>; timer: ReturnType<typeof setTimeout> }>();
+const seenMessageIds = new Set<string>();
 
 function startControlServer() {
   controlServer = Bun.serve({
@@ -182,7 +68,7 @@ function startControlServer() {
         return undefined;
       }
 
-      return new Response("AgentBridge daemon");
+      return new Response("cc-bridge daemon");
     },
     websocket: {
       open: (ws: ServerWebSocket<ControlSocketData>) => {
@@ -233,40 +119,33 @@ function handleControlMessage(ws: ServerWebSocket<ControlSocketData>, raw: strin
         return;
       }
 
-      if (!tuiConnectionState.canReply()) {
+      try {
+        postPeerMessage(message.message.content);
+        sendProtocolMessage(ws, {
+          type: "claude_to_codex_result",
+          requestId: message.requestId,
+          success: true,
+        });
+      } catch (err: any) {
         sendProtocolMessage(ws, {
           type: "claude_to_codex_result",
           requestId: message.requestId,
           success: false,
-          error: "Codex is not ready. Wait for TUI to connect and create a thread.",
+          error: err.message,
         });
-        return;
       }
-
-      const contentWithReminder = message.message.content + "\n\n" + BRIDGE_CONTRACT_REMINDER;
-      log(`Forwarding Claude → Codex (${message.message.content.length} chars)`);
-      const injected = codex.injectMessage(contentWithReminder);
-      if (!injected) {
-        const reason = codex.turnInProgress
-          ? "Codex is busy executing a turn. Wait for it to finish before sending another message."
-          : "Injection failed: no active thread or WebSocket not connected.";
-        log(`Injection rejected: ${reason}`);
-        sendProtocolMessage(ws, {
-          type: "claude_to_codex_result",
-          requestId: message.requestId,
-          success: false,
-          error: reason,
-        });
-        return;
-      }
-      clearAttentionWindow(); // Claude successfully replied, end attention window
-      sendProtocolMessage(ws, {
-        type: "claude_to_codex_result",
-        requestId: message.requestId,
-        success: true,
-      });
       return;
     }
+    case "pull_messages":
+      sendProtocolMessage(ws, {
+        type: "pull_messages_result",
+        requestId: message.requestId,
+        messages: drainPendingPullMessages(),
+      });
+      return;
+    case "wait_for_messages":
+      handleWaitForMessages(ws, message.requestId, message.timeoutMs);
+      return;
   }
 }
 
@@ -280,89 +159,29 @@ function attachClaude(ws: ServerWebSocket<ControlSocketData>) {
   cancelIdleShutdown();
   log(`Claude frontend attached (#${ws.data.clientId})`);
 
-  statusBuffer.flush("claude reconnected");
   sendStatus(ws);
 
   if (bufferedMessages.length > 0) {
     flushBufferedMessages(ws);
-  } else if (tuiConnectionState.canReply()) {
+  } else {
     sendBridgeMessage(ws, systemMessage("system_ready", currentReadyMessage()));
-  } else if (codexBootstrapped) {
-    sendBridgeMessage(ws, systemMessage("system_waiting", currentWaitingMessage()));
-  }
-
-  if (tuiConnectionState.canReply()) {
-    notifyCodexClaudeOnline();
   }
 }
 
 function detachClaude(ws: ServerWebSocket<ControlSocketData>, reason: string) {
   if (attachedClaude !== ws) return;
-
   attachedClaude = null;
   ws.data.attached = false;
   log(`Claude frontend detached (#${ws.data.clientId}, ${reason})`);
-
-  if (tuiConnectionState.canReply()) {
-    codex.injectMessage("⚠️ Claude Code went offline. AgentBridge is still running in the background; it will reconnect automatically when Claude reopens.");
-  }
-
+  clearWaitersForSocket(ws);
   scheduleIdleShutdown();
 }
 
-function startAttentionWindow() {
-  clearAttentionWindow();
-  inAttentionWindow = true;
-  statusBuffer.pause();
-  log(`Attention window started (${ATTENTION_WINDOW_MS}ms)`);
-  attentionWindowTimer = setTimeout(() => {
-    attentionWindowTimer = null;
-    inAttentionWindow = false;
-    statusBuffer.resume();
-    log("Attention window ended");
-  }, ATTENTION_WINDOW_MS);
-}
-
-function clearAttentionWindow() {
-  if (attentionWindowTimer) {
-    clearTimeout(attentionWindowTimer);
-    attentionWindowTimer = null;
-  }
-  if (inAttentionWindow) {
-    statusBuffer.resume();
-  }
-  inAttentionWindow = false;
-}
-
-function scheduleIdleShutdown() {
-  cancelIdleShutdown();
-  if (attachedClaude) return; // still has a client
-
-  const snapshot = tuiConnectionState.snapshot();
-  if (snapshot.tuiConnected) return; // TUI still connected
-
-  log(`No clients connected. Daemon will shut down in ${IDLE_SHUTDOWN_MS}ms if no one reconnects.`);
-  idleShutdownTimer = setTimeout(() => {
-    // Re-check before shutting down
-    if (attachedClaude || tuiConnectionState.snapshot().tuiConnected) {
-      log("Idle shutdown cancelled: client reconnected during grace period");
-      return;
-    }
-    shutdown("idle — no clients connected");
-  }, IDLE_SHUTDOWN_MS);
-}
-
-function cancelIdleShutdown() {
-  if (idleShutdownTimer) {
-    clearTimeout(idleShutdownTimer);
-    idleShutdownTimer = null;
-  }
-}
-
 function emitToClaude(message: BridgeMessage) {
+  pendingPullMessages.push(message);
+  fulfillWaiters();
   if (attachedClaude && attachedClaude.readyState === WebSocket.OPEN) {
     if (trySendBridgeMessage(attachedClaude, message)) return;
-    // Send failed — fall through to buffer
     log("Send to Claude failed, buffering message for retry on reconnect");
   }
 
@@ -392,7 +211,6 @@ function flushBufferedMessages(ws: ServerWebSocket<ControlSocketData>) {
   const messages = bufferedMessages.splice(0, bufferedMessages.length);
   for (const message of messages) {
     if (!trySendBridgeMessage(ws, message)) {
-      // Re-buffer this and all remaining messages on failure
       const failedIndex = messages.indexOf(message);
       const remaining = messages.slice(failedIndex);
       bufferedMessages.unshift(...remaining);
@@ -424,28 +242,63 @@ function sendProtocolMessage(ws: ServerWebSocket<ControlSocketData>, message: Co
 }
 
 function currentStatus(): DaemonStatus {
-  const snapshot = tuiConnectionState.snapshot();
   return {
-    bridgeReady: tuiConnectionState.canReply(),
-    tuiConnected: snapshot.tuiConnected,
-    threadId: codex.activeThreadId,
-    queuedMessageCount: bufferedMessages.length + statusBuffer.size,
-    proxyUrl: codex.proxyUrl,
-    appServerUrl: codex.appServerUrl,
+    bridgeReady: bootstrapped,
+    peerConnected,
+    room: ROOM,
+    peerCount,
+    queuedMessageCount: bufferedMessages.length,
+    endpoint: ENDPOINT,
     pid: process.pid,
   };
 }
 
-function currentWaitingMessage() {
-  return `⏳ Waiting for Codex TUI to connect. Run in another terminal:\n${attachCmd}`;
+function drainPendingPullMessages(): BridgeMessage[] {
+  const messages = pendingPullMessages.splice(0, pendingPullMessages.length);
+  return messages;
+}
+
+function handleWaitForMessages(ws: ServerWebSocket<ControlSocketData>, requestId: string, timeoutMs: number) {
+  const messages = drainPendingPullMessages();
+  if (messages.length > 0) {
+    sendProtocolMessage(ws, { type: "wait_for_messages_result", requestId, messages });
+    return;
+  }
+
+  const boundedTimeout = Math.max(1000, Math.min(120000, timeoutMs || 30000));
+  const timer = setTimeout(() => {
+    waiters.delete(requestId);
+    sendProtocolMessage(ws, { type: "wait_for_messages_result", requestId, messages: [] });
+  }, boundedTimeout);
+
+  waiters.set(requestId, { ws, timer });
+}
+
+function fulfillWaiters() {
+  if (pendingPullMessages.length === 0 || waiters.size === 0) return;
+
+  const messages = drainPendingPullMessages();
+  for (const [requestId, waiter] of waiters.entries()) {
+    clearTimeout(waiter.timer);
+    sendProtocolMessage(waiter.ws, { type: "wait_for_messages_result", requestId, messages });
+    waiters.delete(requestId);
+  }
+}
+
+function clearWaitersForSocket(ws: ServerWebSocket<ControlSocketData>) {
+  for (const [requestId, waiter] of waiters.entries()) {
+    if (waiter.ws !== ws) continue;
+    clearTimeout(waiter.timer);
+    waiters.delete(requestId);
+  }
 }
 
 function currentReadyMessage() {
-  return `✅ Codex TUI connected (${codex.activeThreadId}). Bridge ready.`;
-}
+  if (peerConnected) {
+    return `✅ ${PEER_LABEL} connected in room '${ROOM}'. Endpoint=${ENDPOINT}, peers=${peerCount}.`;
+  }
 
-function notifyCodexClaudeOnline() {
-  codex.injectMessage("✅ AgentBridge connected to Claude Code.");
+  return `⏳ Waiting for another Claude window in room '${ROOM}'. Endpoint=${ENDPOINT}.`;
 }
 
 function systemMessage(idPrefix: string, content: string): BridgeMessage {
@@ -455,6 +308,156 @@ function systemMessage(idPrefix: string, content: string): BridgeMessage {
     content,
     timestamp: Date.now(),
   };
+}
+
+function ensureRelayDirs() {
+  mkdirSync(PEERS_DIR, { recursive: true });
+  mkdirSync(MESSAGES_DIR, { recursive: true });
+}
+
+function peerHeartbeatPath(endpoint: string) {
+  return join(PEERS_DIR, `${endpoint}.json`);
+}
+
+function messagePath(id: string) {
+  return join(MESSAGES_DIR, `${id}.json`);
+}
+
+function writeHeartbeat() {
+  ensureRelayDirs();
+  const payload = {
+    endpoint: ENDPOINT,
+    room: ROOM,
+    updatedAt: Date.now(),
+    pid: process.pid,
+  };
+  writeFileSync(peerHeartbeatPath(ENDPOINT), JSON.stringify(payload), "utf-8");
+}
+
+function refreshPeers() {
+  ensureRelayDirs();
+  let nextPeerCount = 0;
+
+  for (const entry of readdirSync(PEERS_DIR)) {
+    if (!entry.endsWith(".json")) continue;
+    const fullPath = join(PEERS_DIR, entry);
+    try {
+      const peer = JSON.parse(readFileSync(fullPath, "utf-8")) as { endpoint?: string; updatedAt?: number };
+      const endpoint = peer.endpoint ?? entry.replace(/\.json$/, "");
+      const updatedAt = Number(peer.updatedAt ?? 0);
+      if (!updatedAt || Date.now() - updatedAt > PEER_STALE_MS) {
+        unlinkSync(fullPath);
+        continue;
+      }
+      if (endpoint !== ENDPOINT) {
+        nextPeerCount += 1;
+      }
+    } catch {
+      try { unlinkSync(fullPath); } catch {}
+    }
+  }
+
+  const wasConnected = peerConnected;
+  peerCount = nextPeerCount;
+  peerConnected = nextPeerCount > 0;
+
+  if (!wasConnected && peerConnected) {
+    emitToClaude(systemMessage("peer_joined", `✅ ${PEER_LABEL} joined room '${ROOM}'. peers=${peerCount}.`));
+    broadcastStatus();
+  } else if (wasConnected && !peerConnected) {
+    emitToClaude(systemMessage("peer_left", `⚠️ No peer currently active in room '${ROOM}'.`));
+    broadcastStatus();
+  }
+}
+
+function pollMessages() {
+  ensureRelayDirs();
+  for (const entry of readdirSync(MESSAGES_DIR)) {
+    if (!entry.endsWith(".json")) continue;
+
+    const fullPath = join(MESSAGES_DIR, entry);
+    try {
+      const envelope = JSON.parse(readFileSync(fullPath, "utf-8")) as RelayEnvelope;
+      if (seenMessageIds.has(envelope.id)) continue;
+      seenMessageIds.add(envelope.id);
+
+      if (envelope.room !== ROOM) continue;
+      if (envelope.sender === ENDPOINT) continue;
+
+      emitToClaude({
+        id: envelope.id,
+        source: "codex",
+        content: `[${envelope.sender}] ${envelope.content}`,
+        timestamp: envelope.timestamp,
+      });
+    } catch (err: any) {
+      log(`Failed to read relay message ${entry}: ${err.message}`);
+    }
+  }
+}
+
+function postPeerMessage(content: string) {
+  ensureRelayDirs();
+  const envelope: RelayEnvelope = {
+    id: `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
+    sender: ENDPOINT,
+    room: ROOM,
+    content,
+    timestamp: Date.now(),
+  };
+  seenMessageIds.add(envelope.id);
+  writeFileSync(messagePath(envelope.id), JSON.stringify(envelope), "utf-8");
+  log(`Forwarding local Claude -> peer (${content.length} chars)`);
+}
+
+function startRelayLoops() {
+  writeHeartbeat();
+  refreshPeers();
+  pollMessages();
+
+  heartbeatTimer = setInterval(() => {
+    writeHeartbeat();
+    refreshPeers();
+  }, HEARTBEAT_MS);
+
+  pollTimer = setInterval(() => {
+    pollMessages();
+  }, POLL_INTERVAL_MS);
+}
+
+function stopRelayLoops() {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  try {
+    unlinkSync(peerHeartbeatPath(ENDPOINT));
+  } catch {}
+}
+
+function scheduleIdleShutdown() {
+  cancelIdleShutdown();
+  if (attachedClaude) return;
+
+  log(`No Claude client connected. Daemon will shut down in ${IDLE_SHUTDOWN_MS}ms if no one reconnects.`);
+  idleShutdownTimer = setTimeout(() => {
+    if (attachedClaude) {
+      log("Idle shutdown cancelled: Claude reconnected during grace period");
+      return;
+    }
+    shutdown("idle — no Claude client connected");
+  }, IDLE_SHUTDOWN_MS);
+}
+
+function cancelIdleShutdown() {
+  if (idleShutdownTimer) {
+    clearTimeout(idleShutdownTimer);
+    idleShutdownTimer = null;
+  }
 }
 
 function writePidFile() {
@@ -467,45 +470,51 @@ function removePidFile() {
   } catch {}
 }
 
-async function bootCodex() {
-  log("Starting AgentBridge daemon...");
-  log(`Codex app-server: ${codex.appServerUrl}`);
-  log(`Codex proxy: ${codex.proxyUrl}`);
+function bootRelay() {
+  log(`Starting cc-bridge daemon for room='${ROOM}' endpoint='${ENDPOINT}'`);
   log(`Control server: ws://127.0.0.1:${CONTROL_PORT}/ws`);
+  log(`Relay state dir: ${ROOM_DIR}`);
 
-  try {
-    await codex.start();
-    codexBootstrapped = true;
-
-    emitToClaude(systemMessage("system_waiting", currentWaitingMessage()));
-    broadcastStatus();
-  } catch (err: any) {
-    log(`Failed to start Codex: ${err.message}`);
-    emitToClaude(
-      systemMessage(
-        "system_codex_start_failed",
-        `❌ AgentBridge failed to start Codex app-server: ${err.message}`,
-      ),
-    );
-    broadcastStatus();
-  }
+  ensureRelayDirs();
+  startRelayLoops();
+  bootstrapped = true;
+  emitToClaude(systemMessage("system_ready", currentReadyMessage()));
+  broadcastStatus();
 }
 
 function shutdown(reason: string) {
   if (shuttingDown) return;
   shuttingDown = true;
   log(`Shutting down daemon (${reason})...`);
-  tuiConnectionState.dispose(`daemon shutdown (${reason})`);
+  for (const waiter of waiters.values()) {
+    clearTimeout(waiter.timer);
+  }
+  waiters.clear();
+  stopRelayLoops();
   controlServer?.stop();
   controlServer = null;
-  codex.stop();
   removePidFile();
   process.exit(0);
 }
 
+function sanitizeName(raw: string): string {
+  const trimmed = raw.trim();
+  const safe = trimmed.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return safe || "default";
+}
+
+function parsePositiveInt(raw: string | undefined, fallback: number): number {
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("exit", () => removePidFile());
+process.on("exit", () => {
+  stopRelayLoops();
+  removePidFile();
+});
 process.on("uncaughtException", (err) => {
   log(`UNCAUGHT EXCEPTION: ${err.stack ?? err.message}`);
 });
@@ -514,7 +523,7 @@ process.on("unhandledRejection", (reason: any) => {
 });
 
 function log(msg: string) {
-  const line = `[${new Date().toISOString()}] [AgentBridgeDaemon] ${msg}\n`;
+  const line = `[${new Date().toISOString()}] [cc-bridge] ${msg}\n`;
   process.stderr.write(line);
   try {
     appendFileSync(LOG_FILE, line);
@@ -523,4 +532,4 @@ function log(msg: string) {
 
 writePidFile();
 startControlServer();
-void bootCodex();
+bootRelay();

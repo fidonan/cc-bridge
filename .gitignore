@@ -2,10 +2,13 @@ node_modules/
 dist/
 coverage/
 *.log
+*.pid
 .DS_Store
 .claude/
 codex/
 agent_collab/
 .mcp.json
+.env
+.env.*
 agentbridge-context.md
 V1_PROGRESS.md

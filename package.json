@@ -1,8 +1,8 @@
 {
-  "name": "agentbridge",
+  "name": "cc-bridge",
   "version": "0.1.0",
   "private": true,
-  "description": "Bridge between Claude Code and Codex — bidirectional agent communication via MCP Channel + JSON-RPC",
+  "description": "Local bridge for sustained collaboration between two Claude Code windows",
   "type": "module",
   "main": "src/bridge.ts",
   "scripts": {
@@ -11,24 +11,16 @@
     "typecheck": "tsc --noEmit",
     "check": "tsc --noEmit && bun test src"
   },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/raysonmeng/agent-bridge.git"
-  },
-  "homepage": "https://github.com/raysonmeng/agent-bridge#readme",
-  "bugs": {
-    "url": "https://github.com/raysonmeng/agent-bridge/issues"
-  },
   "keywords": [
     "claude-code",
-    "codex",
     "mcp",
     "agent",
     "bridge",
     "multi-agent",
-    "channels"
+    "dual-claude",
+    "cc-switch"
   ],
-  "author": "AgentBridge Contributors",
+  "author": "fido",
   "license": "MIT",
   "devDependencies": {
     "@types/bun": "^1.3.11",

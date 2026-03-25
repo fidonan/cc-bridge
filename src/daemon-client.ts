@@ -11,6 +11,21 @@ interface DaemonClientEvents {
 export class DaemonClient extends EventEmitter<DaemonClientEvents> {
   private ws: WebSocket | null = null;
   private nextRequestId = 1;
+  private connectPromise: Promise<void> | null = null;
+  private pendingPulls = new Map<
+    string,
+    {
+      resolve: (value: BridgeMessage[]) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
+  private pendingWaits = new Map<
+    string,
+    {
+      resolve: (value: BridgeMessage[]) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
   private pendingReplies = new Map<
     string,
     {
@@ -25,8 +40,12 @@ export class DaemonClient extends EventEmitter<DaemonClientEvents> {
 
   async connect() {
     if (this.ws?.readyState === WebSocket.OPEN) return;
+    if (this.connectPromise) {
+      await this.connectPromise;
+      return;
+    }
 
-    await new Promise<void>((resolve, reject) => {
+    this.connectPromise = new Promise<void>((resolve, reject) => {
       const ws = new WebSocket(this.url);
       let settled = false;
 
@@ -40,15 +59,21 @@ export class DaemonClient extends EventEmitter<DaemonClientEvents> {
       ws.onerror = () => {
         if (settled) return;
         settled = true;
-        reject(new Error(`Failed to connect to AgentBridge daemon at ${this.url}`));
+        reject(new Error(`Failed to connect to cc-bridge daemon at ${this.url}`));
       };
 
       ws.onclose = () => {
         if (settled) return;
         settled = true;
-        reject(new Error(`AgentBridge daemon closed the connection during startup (${this.url})`));
+        reject(new Error(`cc-bridge daemon closed the connection during startup (${this.url})`));
       };
     });
+
+    try {
+      await this.connectPromise;
+    } finally {
+      this.connectPromise = null;
+    }
   }
 
   attachClaude() {
@@ -71,15 +96,24 @@ export class DaemonClient extends EventEmitter<DaemonClientEvents> {
   }
 
   async sendReply(message: BridgeMessage): Promise<{ success: boolean; error?: string }> {
+    try {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        await this.connect();
+        this.attachClaude();
+      }
+    } catch (err: any) {
+      return { success: false, error: err.message ?? "cc-bridge daemon is not connected." };
+    }
+
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      return { success: false, error: "AgentBridge daemon is not connected." };
+      return { success: false, error: "cc-bridge daemon is not connected." };
     }
 
     const requestId = `reply_${Date.now()}_${this.nextRequestId++}`;
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         this.pendingReplies.delete(requestId);
-        resolve({ success: false, error: "Timed out waiting for AgentBridge daemon reply." });
+        resolve({ success: false, error: "Timed out waiting for cc-bridge daemon reply." });
       }, 15000);
 
       this.pendingReplies.set(requestId, { resolve, timer });
@@ -88,6 +122,58 @@ export class DaemonClient extends EventEmitter<DaemonClientEvents> {
         requestId,
         message,
       });
+    });
+  }
+
+  async pullMessages(): Promise<BridgeMessage[]> {
+    try {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        await this.connect();
+        this.attachClaude();
+      }
+    } catch {
+      return [];
+    }
+
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return [];
+    }
+
+    const requestId = `pull_${Date.now()}_${this.nextRequestId++}`;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingPulls.delete(requestId);
+        resolve([]);
+      }, 15000);
+
+      this.pendingPulls.set(requestId, { resolve, timer });
+      this.send({ type: "pull_messages", requestId });
+    });
+  }
+
+  async waitForMessages(timeoutMs = 30000): Promise<BridgeMessage[]> {
+    try {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        await this.connect();
+        this.attachClaude();
+      }
+    } catch {
+      return [];
+    }
+
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return [];
+    }
+
+    const requestId = `wait_${Date.now()}_${this.nextRequestId++}`;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingWaits.delete(requestId);
+        resolve([]);
+      }, timeoutMs + 2000);
+
+      this.pendingWaits.set(requestId, { resolve, timer });
+      this.send({ type: "wait_for_messages", requestId, timeoutMs });
     });
   }
 
@@ -114,6 +200,22 @@ export class DaemonClient extends EventEmitter<DaemonClientEvents> {
           pending.resolve({ success: message.success, error: message.error });
           return;
         }
+        case "pull_messages_result": {
+          const pending = this.pendingPulls.get(message.requestId);
+          if (!pending) return;
+          clearTimeout(pending.timer);
+          this.pendingPulls.delete(message.requestId);
+          pending.resolve(message.messages);
+          return;
+        }
+        case "wait_for_messages_result": {
+          const pending = this.pendingWaits.get(message.requestId);
+          if (!pending) return;
+          clearTimeout(pending.timer);
+          this.pendingWaits.delete(message.requestId);
+          pending.resolve(message.messages);
+          return;
+        }
         case "status":
           this.emit("status", message.status);
           return;
@@ -124,7 +226,7 @@ export class DaemonClient extends EventEmitter<DaemonClientEvents> {
       if (this.ws === ws) {
         this.ws = null;
       }
-      this.rejectPendingReplies("AgentBridge daemon disconnected.");
+      this.rejectPendingReplies("cc-bridge daemon disconnected.");
       this.emit("disconnect");
     };
 
@@ -139,11 +241,21 @@ export class DaemonClient extends EventEmitter<DaemonClientEvents> {
       pending.resolve({ success: false, error });
       this.pendingReplies.delete(requestId);
     }
+    for (const [requestId, pending] of this.pendingPulls.entries()) {
+      clearTimeout(pending.timer);
+      pending.resolve([]);
+      this.pendingPulls.delete(requestId);
+    }
+    for (const [requestId, pending] of this.pendingWaits.entries()) {
+      clearTimeout(pending.timer);
+      pending.resolve([]);
+      this.pendingWaits.delete(requestId);
+    }
   }
 
   private send(message: ControlClientMessage) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new Error("AgentBridge daemon socket is not open.");
+      throw new Error("cc-bridge daemon socket is not open.");
     }
 
     this.ws.send(JSON.stringify(message));
