@@ -12,6 +12,19 @@ English version: [README.md](README.md)
 
 - [QUICKSTART.md](QUICKSTART.md)
 
+## 今日进展
+
+截至 `2026-03-26`，当前仓库已经验证了两件关键能力：
+
+1. 两个 Claude Code 窗口可以通过 `cc-bridge` 持续对话，直到形成 `Current consensus:`
+2. 可以与 [`cc-weixin`](https://github.com/qufei1993/cc-weixin) 协作使用，让微信消息进入窗口 A，再由窗口 A 拉起窗口 B 进行协作
+
+这意味着当前已经可以实现这样一条链路：
+
+`微信 -> Claude Code A -> cc-bridge -> Claude Code B`
+
+也就是说，已经具备“通过微信发消息开始 Claude Code 窗口协作”的可行性验证。
+
 ## 致谢
 
 这个项目是基于 [`raysonmeng/agent-bridge`](https://github.com/raysonmeng/agent-bridge) 修改而来的 fork。
@@ -116,6 +129,7 @@ English version: [README.md](README.md)
 - A 可以发消息给 B
 - B 可以回复 A
 - 双方可以继续多轮交互，直到各自输出 `Current consensus:`
+- 可以与 `cc-weixin` 联动，由微信触发窗口 A，再由 A 拉起窗口 B 协作
 
 当前约束：
 
