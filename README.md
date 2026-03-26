@@ -10,6 +10,27 @@
 
 - [QUICKSTART.md](QUICKSTART.md)
 
+## 给不会命令行的初学者
+
+如果你已经打开了 Claude Code，也可以直接把下面这段发给 Claude，让它帮你完成下载和初始化：
+
+```text
+请帮我在本地下载并初始化 cc-bridge。
+
+目标：
+1. 克隆仓库 https://github.com/fidonan/cc-bridge
+2. 进入项目目录
+3. 运行 bun run setup
+4. 检查 cc-bridge-1 和 cc-bridge-2 是否注册成功
+5. 然后告诉我下一步该怎么打开两个 Claude Code 窗口
+```
+
+如果仓库已经在本地，也可以直接发：
+
+```text
+请进入本地 cc-bridge 项目并运行 bun run setup，然后检查 cc-bridge-1 和 cc-bridge-2 是否可用，最后告诉我下一步怎么开始。
+```
+
 ## 今日进展
 
 截至 `2026-03-26`，当前仓库已经验证了两件关键能力：

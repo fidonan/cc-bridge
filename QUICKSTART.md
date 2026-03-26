@@ -4,6 +4,27 @@
 
 Get two Claude Code windows talking to each other through `cc-bridge` in a few minutes.
 
+## If you don't want to type shell commands yourself
+
+You can paste this directly into Claude Code:
+
+```text
+Please help me set up cc-bridge on this machine.
+
+Steps:
+1. Clone https://github.com/fidonan/cc-bridge
+2. Enter the project directory
+3. Run bun run setup
+4. Verify cc-bridge-1 and cc-bridge-2 are available
+5. Then tell me how to open two Claude Code windows and start the first test discussion
+```
+
+If the repo is already on disk, use:
+
+```text
+Please enter the local cc-bridge project, run bun run setup, verify cc-bridge-1 and cc-bridge-2, and then tell me how to start.
+```
+
 ## 1. Run setup
 
 ```bash
