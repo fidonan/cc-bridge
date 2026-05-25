@@ -1,12 +1,39 @@
 // ===== Bridge Core Types =====
 
-export type MessageSource = "claude" | "codex";
+export type MessageSource = string;
+export type SenderKind = "cc" | "wechat" | "codex" | (string & {});
+export type RelayRouteMode = "direct" | "multicast" | "broadcast";
 
 export interface BridgeMessage {
   id: string;
   source: MessageSource;
   content: string;
   timestamp: number;
+  senderId?: string;
+  sender?: string;
+  senderKind?: SenderKind;
+}
+
+export interface RelayRoute {
+  mode: RelayRouteMode;
+  to?: string[];
+}
+
+export interface RelayEnvelope {
+  id: string;
+  room: string;
+  content: string;
+  timestamp: number;
+  senderId?: string;
+  senderKind?: SenderKind;
+  route?: RelayRoute;
+  resolvedRecipients?: string[];
+  sender?: string;
+  // Phase 4D-1: cross-room forwarding fields.
+  // sender_room: the room of the originating coordinator (daemon + room identifies sender in 4D-1).
+  // target_endpoint: explicit destination EndpointId for cross-room point-to-point sends.
+  sender_room?: string;
+  target_endpoint?: string;
 }
 
 // ===== JSON-RPC 2.0 =====

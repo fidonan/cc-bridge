@@ -23,9 +23,36 @@ import { appendFileSync } from "node:fs";
 import { getInstanceConfig } from "./instance-config";
 import type { BridgeMessage } from "./types";
 
-export type ReplySender = (msg: BridgeMessage) => Promise<{ success: boolean; error?: string }>;
+export type ReplySender = (
+  msg: BridgeMessage,
+  to?: string[],
+  scope?: "room" | "global",
+) => Promise<{ success: boolean; error?: string; resolvedRecipients?: string[]; missingRecipients?: string[]; delivered_rooms?: string[]; skipped_rooms?: string[] }>;
 export type PullMessageReader = () => Promise<BridgeMessage[]>;
 export type WaitMessageReader = (timeoutMs: number) => Promise<BridgeMessage[]>;
+export type PeerLister = () => string[];
+export type RegistryReader = () => Promise<import("./protocol").RegistrySnapshot>;
+export type PeerLauncher = (input: {
+  peerTargets?: Array<{
+    endpoint: string;
+    role?: string;
+    profile?: string;
+    workdir?: string;
+    bootstrap_message?: string;
+  }>;
+  targets?: string[];
+  count?: number;
+  startFrom?: string;
+  profiles?: Record<string, string>;
+  workdir?: string;
+  initialPrompt?: string;
+  initialPrompts?: Record<string, string>;
+}) => Promise<{
+  success: boolean;
+  launched: string[];
+  failed: Record<string, string>;
+  note?: string;
+}>;
 export type DeliveryMode = "push" | "pull" | "auto";
 
 export const CLAUDE_INSTRUCTIONS = [
@@ -72,6 +99,9 @@ export class ClaudeAdapter extends EventEmitter {
   private replySender: ReplySender | null = null;
   private pullMessageReader: PullMessageReader | null = null;
   private waitMessageReader: WaitMessageReader | null = null;
+  private peerLister: PeerLister | null = null;
+  private peerLauncher: PeerLauncher | null = null;
+  private registryReader: RegistryReader | null = null;
 
   // Dual-mode transport
   private readonly configuredMode: DeliveryMode;
@@ -123,6 +153,18 @@ export class ClaudeAdapter extends EventEmitter {
 
   setWaitMessageReader(reader: WaitMessageReader) {
     this.waitMessageReader = reader;
+  }
+
+  setPeerLister(lister: PeerLister) {
+    this.peerLister = lister;
+  }
+
+  setPeerLauncher(launcher: PeerLauncher) {
+    this.peerLauncher = launcher;
+  }
+
+  setRegistryReader(reader: RegistryReader) {
+    this.registryReader = reader;
   }
 
   /** Returns the resolved delivery mode. */
@@ -255,7 +297,7 @@ export class ClaudeAdapter extends EventEmitter {
         {
           name: "reply",
           description:
-            "Send a message to the peer Claude session through cc-bridge.",
+            "Send a message to one or more peer Claude sessions through cc-bridge. Omit 'to' to broadcast to all peers.",
           inputSchema: {
             type: "object" as const,
             properties: {
@@ -265,10 +307,96 @@ export class ClaudeAdapter extends EventEmitter {
               },
               text: {
                 type: "string",
-                description: "The message to send to Codex.",
+                description: "The message to send.",
+              },
+              to: {
+                type: "array",
+                items: { type: "string" },
+                description: "Optional list of peer endpoint names to send to (e.g. ['B', 'C']). Omit or pass empty array to broadcast to all peers in room.",
+              },
+              scope: {
+                type: "string",
+                enum: ["room", "global"],
+                description: "Optional delivery scope. 'room' (default) sends to peers in the current room. 'global' broadcasts to all active rooms across the bridge.",
               },
             },
             required: ["text"],
+          },
+        },
+        {
+          name: "list_peers",
+          description: "List the currently active peer endpoints in this room.",
+          inputSchema: {
+            type: "object" as const,
+            properties: {},
+            required: [],
+          },
+        },
+        {
+          name: "list_all_peers",
+          description: "List all known peer endpoints across all rooms, including their role, status, room, and load stats. Uses the daemon registry (not just the current room).",
+          inputSchema: {
+            type: "object" as const,
+            properties: {},
+            required: [],
+          },
+        },
+        {
+          name: "launch_peers",
+          description:
+            "Launch one or more peer Claude Code windows using the configured local launcher template. This is intended for window A to start B/C/D/E via ccswitch or a similar wrapper.",
+          inputSchema: {
+            type: "object" as const,
+            properties: {
+              targets: {
+                type: "array",
+                items: { type: "string" },
+                description: "Optional explicit peer endpoint names to launch, for example ['B', 'C', 'D', 'E'].",
+              },
+              peer_targets: {
+                type: "array",
+                description: "Preferred role-aware launch format. Each target may define endpoint, role, profile, workdir, and bootstrap_message.",
+                items: {
+                  type: "object",
+                  properties: {
+                    endpoint: { type: "string" },
+                    role: { type: "string" },
+                    profile: { type: "string" },
+                    workdir: { type: "string" },
+                    bootstrap_message: { type: "string" },
+                    target_room: { type: "string", description: "Phase 5C: room the peer should join on startup (defaults to caller's room)." },
+                  },
+                  required: ["endpoint"],
+                },
+              },
+              count: {
+                type: "number",
+                description: "Optional number of peer windows to launch. If targets is omitted, endpoints are generated automatically.",
+              },
+              start_from: {
+                type: "string",
+                description: "Optional starting endpoint label for count-based generation, for example 'B' or 'D'.",
+              },
+              profiles: {
+                type: "object",
+                additionalProperties: { type: "string" },
+                description: "Optional endpoint -> ccswitch profile map, for example {\"B\":\"sonnet\",\"C\":\"opus\"}.",
+              },
+              workdir: {
+                type: "string",
+                description: "Optional working directory for launched windows. Defaults to the current cc-bridge directory.",
+              },
+              initial_prompt: {
+                type: "string",
+                description: "Optional initial prompt sent to all launched peer windows at startup.",
+              },
+              initial_prompts: {
+                type: "object",
+                additionalProperties: { type: "string" },
+                description: "Optional endpoint -> initial prompt map, for example {\"B\":\"You are planner B\"}. Overrides initial_prompt per endpoint.",
+              },
+            },
+            required: [],
           },
         },
         {
@@ -310,6 +438,22 @@ export class ClaudeAdapter extends EventEmitter {
         return await this.drainMessages();
       }
 
+      if (name === "list_peers") {
+        const peers = this.peerLister ? this.peerLister() : [];
+        const text = peers.length > 0
+          ? `Active peers in room: ${peers.join(", ")}`
+          : "No peers currently active in room.";
+        return { content: [{ type: "text" as const, text }] };
+      }
+
+      if (name === "list_all_peers") {
+        return await this.handleListAllPeers();
+      }
+
+      if (name === "launch_peers") {
+        return await this.handleLaunchPeers(args as Record<string, unknown>);
+      }
+
       if (name === "wait_for_messages") {
         return await this.waitForMessages(args as Record<string, unknown>);
       }
@@ -330,6 +474,28 @@ export class ClaudeAdapter extends EventEmitter {
       };
     }
 
+    const toRaw = args?.to;
+    let to: string[] | undefined;
+    if (Array.isArray(toRaw) && toRaw.length > 0) {
+      const valid = [...new Set(
+        (toRaw as unknown[])
+          .filter((v): v is string => typeof v === "string")
+          .map((v) => v.trim())
+          .filter((v) => v.length > 0)
+      )];
+      if (valid.length === 0) {
+        return {
+          content: [{ type: "text" as const, text: "Error: 'to' parameter contained no valid peer names. Pass a non-empty array of strings or omit 'to' to broadcast." }],
+          isError: true,
+        };
+      }
+      to = valid;
+    }
+
+    const scopeRaw = args?.scope;
+    const scope: "room" | "global" | undefined =
+      scopeRaw === "room" || scopeRaw === "global" ? scopeRaw : undefined;
+
     const bridgeMsg: BridgeMessage = {
       id: (args?.chat_id as string) ?? `reply_${Date.now()}`,
       source: "claude",
@@ -345,7 +511,7 @@ export class ClaudeAdapter extends EventEmitter {
       };
     }
 
-    const result = await this.replySender(bridgeMsg);
+    const result = await this.replySender(bridgeMsg, to, scope);
     if (!result.success) {
       this.log(`Reply delivery failed: ${result.error}`);
       return {
@@ -357,12 +523,132 @@ export class ClaudeAdapter extends EventEmitter {
     // Include pending message hint
     const pending = this.pendingMessages.length;
     let responseText = "Reply sent to peer Claude.";
+    if (result.delivered_rooms && result.delivered_rooms.length > 0) {
+      responseText += ` Global broadcast delivered to rooms: ${result.delivered_rooms.join(", ")}.`;
+    }
+    if (result.skipped_rooms && result.skipped_rooms.length > 0) {
+      responseText += ` Skipped rooms (no live coordinator): ${result.skipped_rooms.join(", ")}.`;
+    }
+    if (result.resolvedRecipients && result.resolvedRecipients.length > 0) {
+      responseText += ` Delivered to: ${result.resolvedRecipients.join(", ")}.`;
+    }
+    if (result.missingRecipients && result.missingRecipients.length > 0) {
+      responseText += ` Not delivered to offline/unknown peers: ${result.missingRecipients.join(", ")}.`;
+    }
     if (pending > 0) {
       responseText += ` Note: ${pending} unread peer message${pending > 1 ? "s" : ""} already waiting \u2014 call get_messages to read them.`;
     }
 
     return {
       content: [{ type: "text" as const, text: responseText }],
+    };
+  }
+
+  private async handleListAllPeers() {
+    if (!this.registryReader) {
+      return {
+        content: [{ type: "text" as const, text: "Error: registry reader not configured in this cc-bridge instance." }],
+        isError: true,
+      };
+    }
+    const snapshot = await this.registryReader();
+    if (snapshot.peers.length === 0) {
+      return { content: [{ type: "text" as const, text: "No peers registered in daemon registry." }] };
+    }
+    const lines = snapshot.peers.map((p) => {
+      const parts = [`endpoint=${p.endpoint}`, `status=${p.status}`];
+      if (p.role) parts.push(`role=${p.role}`);
+      if (p.room) parts.push(`room=${p.room}`);
+      if (p.active_task_count > 0) parts.push(`tasks=${p.active_task_count}`);
+      return parts.join(" ");
+    });
+    return {
+      content: [{ type: "text" as const, text: `Registry peers (${snapshot.peers.length}):\n${lines.join("\n")}` }],
+    };
+  }
+
+  private async handleLaunchPeers(args: Record<string, unknown>) {
+    const rawTargets = args?.targets;
+    const targets = Array.isArray(rawTargets)
+      ? [...new Set(rawTargets.filter((v): v is string => typeof v === "string").map((v) => v.trim()).filter(Boolean))]
+      : [];
+    const rawPeerTargets = Array.isArray(args?.peer_targets) ? args.peer_targets : [];
+    const count = typeof args?.count === "number" && Number.isFinite(args.count)
+      ? Math.max(0, Math.trunc(args.count))
+      : undefined;
+    const startFrom = typeof args?.start_from === "string" ? args.start_from.trim() : undefined;
+
+    if (!this.peerLauncher) {
+      return {
+        content: [{ type: "text" as const, text: "Error: peer launcher is not configured in this cc-bridge instance." }],
+        isError: true,
+      };
+    }
+
+    if (targets.length === 0 && rawPeerTargets.length === 0 && (!count || count <= 0)) {
+      return {
+        content: [{ type: "text" as const, text: "Error: launch_peers requires peer_targets, a non-empty 'targets' array, or a positive 'count'." }],
+        isError: true,
+      };
+    }
+
+    const profiles = args?.profiles && typeof args.profiles === "object" && !Array.isArray(args.profiles)
+      ? Object.fromEntries(
+          Object.entries(args.profiles as Record<string, unknown>)
+            .filter(([, value]) => typeof value === "string")
+            .map(([key, value]) => [key, (value as string).trim()]),
+        )
+      : undefined;
+
+    const workdir = typeof args?.workdir === "string" ? args.workdir.trim() : undefined;
+    const initialPrompt = typeof args?.initial_prompt === "string" ? args.initial_prompt : undefined;
+    const initialPrompts = args?.initial_prompts && typeof args.initial_prompts === "object" && !Array.isArray(args.initial_prompts)
+      ? Object.fromEntries(
+          Object.entries(args.initial_prompts as Record<string, unknown>)
+            .filter(([, value]) => typeof value === "string")
+            .map(([key, value]) => [key, value as string]),
+        )
+      : undefined;
+    const peerTargets = rawPeerTargets
+      .filter((value): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value))
+      .map((value) => ({
+        endpoint: typeof value.endpoint === "string" ? value.endpoint : "",
+        role: typeof value.role === "string" ? value.role : undefined,
+        profile: typeof value.profile === "string" ? value.profile : undefined,
+        workdir: typeof value.workdir === "string" ? value.workdir : undefined,
+        bootstrap_message: typeof value.bootstrap_message === "string" ? value.bootstrap_message : undefined,
+        target_room: typeof value.target_room === "string" && value.target_room.trim() ? value.target_room.trim() : undefined,
+      }))
+      .filter((value) => value.endpoint.trim().length > 0);
+    const result = await this.peerLauncher({
+      peerTargets,
+      targets,
+      count,
+      startFrom,
+      profiles,
+      workdir,
+      initialPrompt,
+      initialPrompts,
+    });
+
+    const lines = [
+      result.success ? "Peer launch command executed." : "Peer launch command finished with errors.",
+      `Launched: ${result.launched.length > 0 ? result.launched.join(", ") : "(none)"}`,
+    ];
+    if (Object.keys(result.failed).length > 0) {
+      lines.push(
+        `Failed: ${Object.entries(result.failed)
+          .map(([endpoint, error]) => `${endpoint} (${error})`)
+          .join(", ")}`,
+      );
+    }
+    if (result.note) {
+      lines.push(`Note: ${result.note}`);
+    }
+
+    return {
+      content: [{ type: "text" as const, text: lines.join("\n") }],
+      isError: !result.success,
     };
   }
 

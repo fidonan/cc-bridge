@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import type { BridgeMessage } from "./types";
 import type { ControlClientMessage, ControlServerMessage, DaemonStatus } from "./control-protocol";
+import type { RegistrySnapshot } from "./protocol";
 
 interface DaemonClientEvents {
   codexMessage: [BridgeMessage];
@@ -29,13 +30,31 @@ export class DaemonClient extends EventEmitter<DaemonClientEvents> {
   private pendingReplies = new Map<
     string,
     {
-      resolve: (value: { success: boolean; error?: string }) => void;
+      resolve: (value: { success: boolean; error?: string; resolvedRecipients?: string[]; missingRecipients?: string[]; delivered_rooms?: string[]; skipped_rooms?: string[] }) => void;
       timer: ReturnType<typeof setTimeout>;
     }
   >();
+  private pendingRegistryQueries = new Map<
+    string,
+    {
+      resolve: (value: RegistrySnapshot) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
+  private latestPeers: string[] = [];
+  private selfEndpoint: string | null = null;
+  private autoReconnect = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly RECONNECT_DELAY_MS = 3000;
+  private static readonly MAX_RECONNECT_DELAY_MS = 30000;
+  private reconnectAttempts = 0;
 
   constructor(private readonly url: string) {
     super();
+  }
+
+  enableAutoReconnect() {
+    this.autoReconnect = true;
   }
 
   async connect() {
@@ -95,7 +114,17 @@ export class DaemonClient extends EventEmitter<DaemonClientEvents> {
     this.rejectPendingReplies("Daemon connection closed");
   }
 
-  async sendReply(message: BridgeMessage): Promise<{ success: boolean; error?: string }> {
+  listPeers(): string[] {
+    return this.selfEndpoint
+      ? this.latestPeers.filter((p) => p !== this.selfEndpoint)
+      : this.latestPeers;
+  }
+
+  async sendReply(
+    message: BridgeMessage,
+    to?: string[],
+    scope?: "room" | "global",
+  ): Promise<{ success: boolean; error?: string; resolvedRecipients?: string[]; missingRecipients?: string[]; delivered_rooms?: string[]; skipped_rooms?: string[] }> {
     try {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
         await this.connect();
@@ -118,10 +147,38 @@ export class DaemonClient extends EventEmitter<DaemonClientEvents> {
 
       this.pendingReplies.set(requestId, { resolve, timer });
       this.send({
-        type: "claude_to_codex",
+        type: "post_message",
         requestId,
         message,
+        ...(to && to.length > 0 ? { to } : {}),
+        ...(scope ? { scope } : {}),
       });
+    });
+  }
+
+  async queryRegistry(): Promise<RegistrySnapshot> {
+    try {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        await this.connect();
+        this.attachClaude();
+      }
+    } catch {
+      return { peers: [] };
+    }
+
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return { peers: [] };
+    }
+
+    const requestId = `registry_${Date.now()}_${this.nextRequestId++}`;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingRegistryQueries.delete(requestId);
+        resolve({ peers: [] });
+      }, 15000);
+
+      this.pendingRegistryQueries.set(requestId, { resolve, timer });
+      this.send({ type: "query_registry", requestId });
     });
   }
 
@@ -192,12 +249,27 @@ export class DaemonClient extends EventEmitter<DaemonClientEvents> {
         case "codex_to_claude":
           this.emit("codexMessage", message.message);
           return;
-        case "claude_to_codex_result": {
+        case "post_message_result": {
           const pending = this.pendingReplies.get(message.requestId);
           if (!pending) return;
           clearTimeout(pending.timer);
           this.pendingReplies.delete(message.requestId);
-          pending.resolve({ success: message.success, error: message.error });
+          pending.resolve({
+            success: message.success,
+            error: message.error,
+            resolvedRecipients: message.resolvedRecipients,
+            missingRecipients: message.missingRecipients,
+            delivered_rooms: message.delivered_rooms,
+            skipped_rooms: message.skipped_rooms,
+          });
+          return;
+        }
+        case "query_registry_result": {
+          const pending = this.pendingRegistryQueries.get(message.requestId);
+          if (!pending) return;
+          clearTimeout(pending.timer);
+          this.pendingRegistryQueries.delete(message.requestId);
+          pending.resolve(message.snapshot);
           return;
         }
         case "pull_messages_result": {
@@ -217,6 +289,8 @@ export class DaemonClient extends EventEmitter<DaemonClientEvents> {
           return;
         }
         case "status":
+          this.selfEndpoint = message.status.endpoint ?? null;
+          this.latestPeers = message.status.peers ?? [];
           this.emit("status", message.status);
           return;
       }
@@ -228,6 +302,7 @@ export class DaemonClient extends EventEmitter<DaemonClientEvents> {
       }
       this.rejectPendingReplies("cc-bridge daemon disconnected.");
       this.emit("disconnect");
+      this.scheduleReconnect();
     };
 
     ws.onerror = () => {
@@ -251,6 +326,11 @@ export class DaemonClient extends EventEmitter<DaemonClientEvents> {
       pending.resolve([]);
       this.pendingWaits.delete(requestId);
     }
+    for (const [requestId, pending] of this.pendingRegistryQueries.entries()) {
+      clearTimeout(pending.timer);
+      pending.resolve({ peers: [] });
+      this.pendingRegistryQueries.delete(requestId);
+    }
   }
 
   private send(message: ControlClientMessage) {
@@ -259,5 +339,34 @@ export class DaemonClient extends EventEmitter<DaemonClientEvents> {
     }
 
     this.ws.send(JSON.stringify(message));
+  }
+
+  private scheduleReconnect() {
+    if (!this.autoReconnect) return;
+    if (this.reconnectTimer) return;
+
+    const delay = Math.min(
+      DaemonClient.RECONNECT_DELAY_MS * Math.pow(2, this.reconnectAttempts),
+      DaemonClient.MAX_RECONNECT_DELAY_MS,
+    );
+    this.reconnectTimer = setTimeout(async () => {
+      this.reconnectTimer = null;
+      this.reconnectAttempts++;
+      try {
+        await this.connect();
+        this.attachClaude();
+        this.reconnectAttempts = 0;
+      } catch {
+        this.scheduleReconnect();
+      }
+    }, delay);
+  }
+
+  cancelReconnect() {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.autoReconnect = false;
   }
 }

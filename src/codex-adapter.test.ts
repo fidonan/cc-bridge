@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { CodexAdapter } from "./codex-adapter";
 
 function createAdapter() {
-  return new CodexAdapter(4510, 4511) as any;
+  return new CodexAdapter({ appPort: 4510, proxyPort: 4511 }) as any;
 }
 
 describe("CodexAdapter app-server response handling", () => {

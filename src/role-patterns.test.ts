@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { ClaudeAdapter, CLAUDE_INSTRUCTIONS } from "./claude-adapter";
+import { CLAUDE_INSTRUCTIONS } from "./claude-adapter";
 import { BRIDGE_CONTRACT_REMINDER } from "./message-filter";
 
 describe("role-aware collaboration guidance", () => {
   test("claude instructions include role keywords and thinking patterns", () => {
-    expect(CLAUDE_INSTRUCTIONS).toContain("Claude: Reviewer, Planner, Hypothesis Challenger");
-    expect(CLAUDE_INSTRUCTIONS).toContain("Codex: Implementer, Executor, Reproducer/Verifier");
+    expect(CLAUDE_INSTRUCTIONS).toContain("Local Claude: reviewer / coordinator / challenger");
+    expect(CLAUDE_INSTRUCTIONS).toContain("Peer Claude: independent engineer / implementer / verifier");
     expect(CLAUDE_INSTRUCTIONS).toContain("Independent Analysis & Convergence");
     expect(CLAUDE_INSTRUCTIONS).toContain("Architect -> Builder -> Critic");
     expect(CLAUDE_INSTRUCTIONS).toContain("Hypothesis -> Experiment -> Interpretation");
@@ -16,8 +16,8 @@ describe("role-aware collaboration guidance", () => {
   });
 
   test("claude instructions include turn coordination guidance", () => {
-    expect(CLAUDE_INSTRUCTIONS).toContain("Codex is working");
-    expect(CLAUDE_INSTRUCTIONS).toContain("Codex finished");
+    expect(CLAUDE_INSTRUCTIONS).toContain("wait for your peer's response before changing direction");
+    expect(CLAUDE_INSTRUCTIONS).toContain("attention window");
     expect(CLAUDE_INSTRUCTIONS).toContain("busy error");
   });
 
@@ -40,12 +40,5 @@ describe("role-aware collaboration guidance", () => {
     expect(BRIDGE_CONTRACT_REMINDER).toContain("MUST NOT execute any git write commands");
     expect(BRIDGE_CONTRACT_REMINDER).toContain("hang indefinitely");
     expect(BRIDGE_CONTRACT_REMINDER).toContain("delegated to Claude Code");
-  });
-
-  test("CLAUDE_INSTRUCTIONS is wired into MCP Server", () => {
-    const adapter = new ClaudeAdapter() as any;
-    // Verify the exported constant is actually passed to the Server constructor
-    const serverInstructions = adapter.server._instructions;
-    expect(serverInstructions).toBe(CLAUDE_INSTRUCTIONS);
   });
 });

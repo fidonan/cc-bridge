@@ -7,6 +7,7 @@ import { ClaudeAdapter } from "./claude-adapter";
 import { DaemonClient } from "./daemon-client";
 import { getInstanceConfig } from "./instance-config";
 import type { BridgeMessage } from "./types";
+import { launchPeers } from "./window-launcher";
 
 const INSTANCE = getInstanceConfig();
 const CONTROL_PORT = INSTANCE.controlPort;
@@ -21,12 +22,12 @@ const daemonClient = new DaemonClient(CONTROL_WS_URL);
 
 let shuttingDown = false;
 
-claude.setReplySender(async (msg: BridgeMessage) => {
+claude.setReplySender(async (msg: BridgeMessage, to?: string[], scope?: "room" | "global") => {
   if (msg.source !== "claude") {
     return { success: false, error: "Invalid message source" };
   }
 
-  return daemonClient.sendReply(msg);
+  return daemonClient.sendReply(msg, to, scope);
 });
 
 claude.setPullMessageReader(async () => {
@@ -36,6 +37,10 @@ claude.setPullMessageReader(async () => {
 claude.setWaitMessageReader(async (timeoutMs) => {
   return daemonClient.waitForMessages(timeoutMs);
 });
+
+claude.setPeerLister(() => daemonClient.listPeers());
+claude.setPeerLauncher(async (input) => launchPeers(input));
+claude.setRegistryReader(async () => daemonClient.queryRegistry());
 
 daemonClient.on("codexMessage", (message) => {
   log(`Forwarding daemon → Claude (${message.content.length} chars)`);
@@ -48,13 +53,15 @@ daemonClient.on("status", (status) => {
   );
 });
 
+daemonClient.enableAutoReconnect();
+
 daemonClient.on("disconnect", () => {
   if (shuttingDown) return;
 
-  log("Daemon control connection closed");
+  log("Daemon control connection closed — will auto-reconnect");
   void claude.pushNotification(systemMessage(
     "system_daemon_disconnected",
-    "⚠️ cc-bridge daemon control connection lost. Claude cannot communicate with its peer right now.",
+    "⚠️ cc-bridge daemon control connection lost. Attempting to reconnect...",
   ));
 });
 

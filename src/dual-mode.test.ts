@@ -1,32 +1,28 @@
-import { describe, expect, test, beforeEach, afterEach } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { ClaudeAdapter } from "./claude-adapter";
 
-// Access internals for testing
+function withEnv<T>(key: string, value: string | undefined, fn: () => T): T {
+  const original = process.env[key];
+
+  if (value === undefined) {
+    delete process.env[key];
+  } else {
+    process.env[key] = value;
+  }
+
+  try {
+    return fn();
+  } finally {
+    if (original === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = original;
+    }
+  }
+}
+
 function createAdapter(envMode?: string): any {
-  const origMode = process.env.AGENTBRIDGE_MODE;
-  const origMax = process.env.AGENTBRIDGE_MAX_BUFFERED_MESSAGES;
-
-  if (envMode !== undefined) {
-    process.env.AGENTBRIDGE_MODE = envMode;
-  } else {
-    delete process.env.AGENTBRIDGE_MODE;
-  }
-
-  const adapter = new ClaudeAdapter() as any;
-
-  // Restore env immediately after construction reads it
-  if (origMode !== undefined) {
-    process.env.AGENTBRIDGE_MODE = origMode;
-  } else {
-    delete process.env.AGENTBRIDGE_MODE;
-  }
-  if (origMax !== undefined) {
-    process.env.AGENTBRIDGE_MAX_BUFFERED_MESSAGES = origMax;
-  } else {
-    delete process.env.AGENTBRIDGE_MAX_BUFFERED_MESSAGES;
-  }
-
-  return adapter;
+  return withEnv("AGENTBRIDGE_MODE", envMode, () => new ClaudeAdapter() as any);
 }
 
 function makeBridgeMessage(content: string, ts?: number) {
@@ -59,7 +55,7 @@ describe("Dual-mode transport: mode resolution", () => {
     expect(adapter.configuredMode).toBe("auto");
   });
 
-  test("auto mode defaults to push", () => {
+  test("auto mode resolves to push once initialized", () => {
     const adapter = createAdapter();
     adapter.resolveMode();
     expect(adapter.resolvedMode).toBe("push");
@@ -95,11 +91,7 @@ describe("Dual-mode transport: pull mode message queue", () => {
   });
 
   test("queueForPull drops oldest when queue is full", () => {
-    const orig = process.env.AGENTBRIDGE_MAX_BUFFERED_MESSAGES;
-    process.env.AGENTBRIDGE_MAX_BUFFERED_MESSAGES = "3";
-    const adapter = createAdapter("pull");
-    process.env.AGENTBRIDGE_MAX_BUFFERED_MESSAGES = orig;
-
+    const adapter = withEnv("AGENTBRIDGE_MAX_BUFFERED_MESSAGES", "3", () => createAdapter("pull"));
     adapter.resolveMode();
 
     adapter.queueForPull(makeBridgeMessage("msg1"));
@@ -116,70 +108,69 @@ describe("Dual-mode transport: pull mode message queue", () => {
   test("pushNotification queues in pull mode", async () => {
     const adapter = createAdapter("pull");
     adapter.resolveMode();
+
     await adapter.pushNotification(makeBridgeMessage("pull msg"));
+
     expect(adapter.pendingMessages).toHaveLength(1);
     expect(adapter.pendingMessages[0].content).toBe("pull msg");
   });
 });
 
 describe("Dual-mode transport: drainMessages (get_messages)", () => {
-  test("returns 'no new messages' when queue is empty", () => {
+  test("returns 'no new messages' when queue is empty", async () => {
     const adapter = createAdapter("pull");
     adapter.resolveMode();
 
-    const result = adapter.drainMessages();
-    expect(result.content[0].text).toBe("No new messages from Codex.");
+    const result = await adapter.drainMessages();
+    expect(result.content[0].text).toBe("No new messages from your peer.");
   });
 
-  test("returns formatted messages and clears queue", () => {
+  test("returns formatted messages and clears queue", async () => {
     const adapter = createAdapter("pull");
     adapter.resolveMode();
 
-    const ts = 1705312200000; // fixed timestamp for deterministic output
+    const ts = 1705312200000;
     adapter.queueForPull(makeBridgeMessage("first message", ts));
     adapter.queueForPull(makeBridgeMessage("second message", ts + 5000));
 
-    const result = adapter.drainMessages();
+    const result = await adapter.drainMessages();
     const text = result.content[0].text;
 
-    expect(text).toContain("[2 new messages from Codex]");
+    expect(text).toContain("[2 new messages from peer]");
     expect(text).toContain("chat_id:");
     expect(text).toContain("[1]");
     expect(text).toContain("first message");
     expect(text).toContain("[2]");
     expect(text).toContain("second message");
 
-    // Queue should be cleared
     expect(adapter.pendingMessages).toHaveLength(0);
     expect(adapter.getPendingMessageCount()).toBe(0);
   });
 
-  test("includes dropped count when messages were lost", () => {
-    const orig = process.env.AGENTBRIDGE_MAX_BUFFERED_MESSAGES;
-    process.env.AGENTBRIDGE_MAX_BUFFERED_MESSAGES = "2";
-    const adapter = createAdapter("pull");
-    process.env.AGENTBRIDGE_MAX_BUFFERED_MESSAGES = orig;
+  test("includes dropped count when messages were lost", async () => {
+    const adapter = withEnv("AGENTBRIDGE_MAX_BUFFERED_MESSAGES", "2", () => createAdapter("pull"));
     adapter.resolveMode();
 
     adapter.queueForPull(makeBridgeMessage("a"));
     adapter.queueForPull(makeBridgeMessage("b"));
-    adapter.queueForPull(makeBridgeMessage("c")); // drops "a"
+    adapter.queueForPull(makeBridgeMessage("c"));
 
-    const result = adapter.drainMessages();
+    const result = await adapter.drainMessages();
     const text = result.content[0].text;
+
     expect(text).toContain("1 older message");
     expect(text).toContain("dropped due to queue overflow");
-    expect(adapter.droppedMessageCount).toBe(0); // reset after drain
+    expect(adapter.droppedMessageCount).toBe(0);
   });
 
-  test("singular message uses correct grammar", () => {
+  test("singular message uses correct grammar", async () => {
     const adapter = createAdapter("pull");
     adapter.resolveMode();
 
     adapter.queueForPull(makeBridgeMessage("only one"));
 
-    const result = adapter.drainMessages();
-    expect(result.content[0].text).toContain("[1 new message from Codex]");
+    const result = await adapter.drainMessages();
+    expect(result.content[0].text).toContain("[1 new message from peer]");
   });
 });
 
@@ -195,8 +186,8 @@ describe("Dual-mode transport: reply pending hint", () => {
     const result = await adapter.handleReply({ chat_id: "test", text: "hello codex" });
     const text = result.content[0].text;
 
-    expect(text).toContain("Reply sent to Codex.");
-    expect(text).toContain("2 unread Codex message");
+    expect(text).toContain("Reply sent to peer Claude.");
+    expect(text).toContain("2 unread peer messages");
     expect(text).toContain("get_messages");
   });
 
@@ -207,7 +198,24 @@ describe("Dual-mode transport: reply pending hint", () => {
     adapter.replySender = async () => ({ success: true });
 
     const result = await adapter.handleReply({ chat_id: "test", text: "hello codex" });
-    expect(result.content[0].text).toBe("Reply sent to Codex.");
+    expect(result.content[0].text).toBe("Reply sent to peer Claude.");
+  });
+
+  test("handleReply reports delivered and missing recipients for partial targeted sends", async () => {
+    const adapter = createAdapter("pull");
+    adapter.resolveMode();
+
+    adapter.replySender = async () => ({
+      success: true,
+      resolvedRecipients: ["B"],
+      missingRecipients: ["Z"],
+    });
+
+    const result = await adapter.handleReply({ chat_id: "test", text: "hello peers", to: ["B", "Z"] });
+    const text = result.content[0].text;
+
+    expect(text).toContain("Delivered to: B.");
+    expect(text).toContain("Not delivered to offline/unknown peers: Z.");
   });
 
   test("handleReply returns error when text is missing", async () => {

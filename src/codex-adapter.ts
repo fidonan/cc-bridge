@@ -31,6 +31,13 @@ interface PendingRequest {
   threadId?: string;
 }
 
+export interface CodexAdapterOptions {
+  appPort?: number;
+  proxyPort?: number;
+  /** When true, skip starting the TUI proxy server (for bridge-codex mode). */
+  skipProxy?: boolean;
+}
+
 export class CodexAdapter extends EventEmitter {
   private static readonly RESPONSE_TRACKING_TTL_MS = 30000;
 
@@ -44,6 +51,7 @@ export class CodexAdapter extends EventEmitter {
   private nextInjectionId = -1;
   private appPort: number;
   private proxyPort: number;
+  private readonly skipProxy: boolean;
   private tuiConnId = 0; // tracks which TUI connection is "current"
 
   private agentMessageBuffers = new Map<string, string[]>();
@@ -58,10 +66,11 @@ export class CodexAdapter extends EventEmitter {
   private bridgeRequestIds = new Map<number, ReturnType<typeof setTimeout>>();
   private intentionalDisconnect = false;
 
-  constructor(appPort = 4500, proxyPort = 4501) {
+  constructor(options: CodexAdapterOptions = {}) {
     super();
-    this.appPort = appPort;
-    this.proxyPort = proxyPort;
+    this.appPort = options.appPort ?? 4500;
+    this.proxyPort = options.proxyPort ?? 4501;
+    this.skipProxy = options.skipProxy ?? false;
   }
 
   get appServerUrl() { return `ws://127.0.0.1:${this.appPort}`; }
@@ -91,8 +100,12 @@ export class CodexAdapter extends EventEmitter {
     // Connect to app-server once, keep it alive permanently
     await this.connectToAppServer();
 
-    this.startProxy();
-    this.log(`Proxy ready on ${this.proxyUrl}`);
+    if (!this.skipProxy) {
+      this.startProxy();
+      this.log(`Proxy ready on ${this.proxyUrl}`);
+    } else {
+      this.log("TUI proxy skipped (skipProxy mode)");
+    }
   }
 
   /** Disconnect the bridge (proxy + app-server WS) without killing the Codex process. */
@@ -682,7 +695,8 @@ export class CodexAdapter extends EventEmitter {
    * occupied by something else, throws with a clear message.
    */
   private async checkPorts() {
-    for (const port of [this.appPort, this.proxyPort]) {
+    const ports = this.skipProxy ? [this.appPort] : [this.appPort, this.proxyPort];
+    for (const port of ports) {
       try {
         const pids = execSync(`lsof -ti :${port}`, { encoding: "utf-8" }).trim();
         if (!pids) continue;
